@@ -89,6 +89,18 @@ These checks do not establish live cache hits, Jev selection quality, or monetar
 
 **Usage.** Records preserve Pi-normalized usage and its calculated cost fields, not raw provider billing. All-zero usage is marked unavailable rather than treated as evidence of a free request. Individual zero fields may be provider defaults rather than measured quantities. The fixture's usage numbers are synthetic and cannot establish actual cache behavior or prices.
 
+## Synthetic Jev pilot
+
+`npm run pilot` prints a dry-run manifest without loading credentials or making network requests. Six authored histories cover basic relevance, a task detour, a corrected requirement, a buried dependency, a superseded read, and instruction-like tool output. Each contains two eligible candidates and a protected latest exchange. Expected answers and their reasons are kept outside the requests. The pilot uses the existing history, candidate, state-builder, and HTTP-client code without a separate prompt.
+
+`npm run pilot:live` loads `TYPESAFE_API_KEY` from the ignored `.env` file and sends those six requests twice, sequentially. Both repeats use identical frozen bodies. This command spends money. The approved campaign is at most 12 requests to `jev-1.13.0`, with no retries, coding-model calls, or automatic expansion. Each request reserves the price of 64,000 input tokens. The full reservation is $0.032256 against a $0.05 estimated allowance at the recorded price. This is not a provider-enforced billing cap. An unexpected usage report stops further requests, but cannot undo charges already incurred.
+
+The runner creates `results/synthetic-v1/` exclusively and refuses to overwrite or resume it. The manifest, including exact synthetic requests, labels, hashes, versions, and price schedule, is written before network access. The journal records a start before each call and the result afterward, with raw usage, scores, and latency. The first service/contract failure or cancellation stops the campaign. Wrong relevance judgments do not cause tuning or retries. An unmatched start after a process crash has unknown outcome and cost. Do not delete the directory to retry an interrupted campaign without reconciling its attempted calls and obtaining approval for further spending.
+
+`report.json` separates unknown costs from the known subtotal, reports relevant-versus-irrelevant pair order, and measures repeat score differences. Strict cutoffs of 0.1, 0.2, and 0.5 are offline diagnostics only. A hypothetical harmful omission means an authored relevant candidate scores below that cutoff; an irrelevant retention is counted separately. No selected context or agent action is executed. These six development cases cannot establish a safe default threshold, calibrated probabilities, injection resistance, real task accuracy, or savings. The client config's required `retireBelow` value is unused by the direct evaluation calls.
+
+Artifacts are private, local, and Git-ignored, not an automatically backed-up research archive. Keep the exact manifest and journal with any report derived from this campaign. A later confirmation study needs a separate frozen dataset and approved protocol.
+
 ## Next stage
 
 Validate the live Jev contract and calibrate the state, questions, and cutoff on small development fixtures before interpreting relevance scores. Then compare retirement with automatic reconsideration of old evidence. The current restoration tests prove the mechanism, not the ability to find relevant history.
