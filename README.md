@@ -101,6 +101,14 @@ The runner creates `results/synthetic-v1/` exclusively and refuses to overwrite 
 
 Artifacts are private, local, and Git-ignored, not an automatically backed-up research archive. Keep the exact manifest and journal with any report derived from this campaign. A later confirmation study needs a separate frozen dataset and approved protocol.
 
+### Paired task-state pilot
+
+`npm run pilot -- --paired` prints the second protocol without network access. It holds candidate evidence fixed across six before/after task pairs. Three corrections swap the required target. A historical comparison and a newly enabled consumer each make a second observation relevant without displacing the first. A temporary detour leaves both relevance labels unchanged. Similar-topic negatives replace the first pilot's repeated marketing example. Relevant candidates occupy each position equally across the ten rankable states.
+
+`npm run pilot:paired:live` loads the ignored `.env` and sends the 12 states twice to the same model and prompt. The approved campaign is at most 24 requests, no retries, with a $0.064512 input reservation against a $0.10 estimated allowance. It writes exclusively to `results/paired-v1/`, separate from the first campaign, with the same journaling and stop rules. Both-positive states have no relevant-versus-irrelevant ranking comparison and are counted as not applicable. Paired results report signed score changes; unchanged labels are controls, not a requirement for identical scores. Missing states produce unknown changes, never zeroes or successes.
+
+These are authored development fixtures, not a held-out benchmark. A correct direction alone does not establish useful separation or safe removal. No cutoff is selected and no prompt is changed by the run.
+
 ## Next stage
 
 The first live contract check passed. Next, test state-dependent relevance on broader development fixtures, especially superseded evidence and similar-topic negatives, before choosing a cutoff or changing the prompt. Then compare retirement with automatic reconsideration of old evidence. The current restoration tests prove the mechanism, not the ability to find relevant history.
