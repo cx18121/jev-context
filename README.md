@@ -109,8 +109,25 @@ Artifacts are private, local, and Git-ignored, not an automatically backed-up re
 
 These are authored development fixtures, not a held-out benchmark. A correct direction alone does not establish useful separation or safe removal. No cutoff is selected and no prompt is changed by the run.
 
+## Harbor integration smoke
+
+The first benchmark integration uses Terminal-Bench 2.1's `log-summary-date-ranges` task at revision `7131e4375048a0e408a8fb404b5f499d726b695b`. Harbor owns the Docker environment and runs the task's unchanged verifier. An isolated Pi SDK frontend loads our extension and calls a scripted model endpoint on loopback. One trial deliberately writes a wrong answer; another computes the correct answer from the task's logs. The runner requires verifier rewards of 0 and 1 respectively, plus exported native Pi sessions and usage records.
+
+Requires Docker and `uv`. This downloads the pinned task, installs Harbor 0.23.0, and builds the task container. It installs Node 22.22.3 and the npm lockfile dependencies inside the container. It makes no paid model calls and does not load `.env`.
+
+```sh
+uv run --no-project --python 3.13 --with harbor==0.23.0 python -m unittest eval.harbor.test_adapter
+uv run --no-project --python 3.13 --with harbor==0.23.0 python -m eval.harbor.smoke
+```
+
+Artifacts go into the exclusive, Git-ignored `results/harbor-smoke-v1/` directory. Existing campaigns are never overwritten or resumed. The manifest records source revision, task hashes and protocol limits. Each trial exports the upload manifest, requests, events, native sessions, labeled synthetic usage, verifier results, and `summary.csv`. Failed runs leave their logs for inspection.
+
+The adapter uploads only the package manifests, `src/*.ts`, and two frontend files. It does not upload local credentials, sessions, tests, or verifier files. Harbor injects the task verifier separately after the agent runs. The adapter reports zero model cost but does not put scripted token counts into Harbor's model metrics. The task's upstream base image and verifier dependencies are not fully pinned transitively, and installation requires network access.
+
+**Evidence boundary.** This is integration plumbing, not a quality evaluation. The task and solution have been inspected and must not enter a held-out set. Neither real coding-model ability, Jev selection, retirement under pressure, restoration, nor savings is tested by this two-turn smoke. Its result does not qualify a benchmark campaign for publication. The frontend's local tests also exercise budget rejection and HTTP failure, requiring failure artifacts and zero or one model requests respectively.
+
 ## Next stage
 
-Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. Next, settle and locally test how retired evidence becomes eligible for automatic reconsideration without repeatedly judging the whole history. The current restoration tests prove the mechanism, not the ability to find relevant history.
+Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke is the next end-to-end gate. Automatic reconsideration of retired evidence remains the next product capability; current restoration tests prove the mechanism, not the ability to find relevant history.
 
-Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, Harbor integration, and compatibility with the normal extension stack remain untested.
+Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, and compatibility with the normal extension stack remain untested.
