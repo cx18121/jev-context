@@ -2,7 +2,7 @@
 
 An experimental context manager for Pi. The goal is to select useful verbatim evidence from preserved session history, reducing total cost without hurting quality or improving quality at an acceptable cost. See [DESIGN.md](DESIGN.md) for the research plan.
 
-This repository contains deterministic and Jev retirement policies. The Jev path is tested against a local API fixture, not the live service. It is not installed in your normal Pi setup. Tests need no credentials or paid model calls.
+This repository contains deterministic and Jev retirement policies. Local fixtures test the Pi integration. A [12-request synthetic pilot](docs/synthetic-pilot-v1.md) also verified the live Jev contract and basic relevance rankings, but not coding-task accuracy or savings. It is not installed in your normal Pi setup. Tests need no credentials or paid model calls.
 
 ## Run the checks
 
@@ -103,6 +103,6 @@ Artifacts are private, local, and Git-ignored, not an automatically backed-up re
 
 ## Next stage
 
-Validate the live Jev contract and calibrate the state, questions, and cutoff on small development fixtures before interpreting relevance scores. Then compare retirement with automatic reconsideration of old evidence. The current restoration tests prove the mechanism, not the ability to find relevant history.
+The first live contract check passed. Next, test state-dependent relevance on broader development fixtures, especially superseded evidence and similar-topic negatives, before choosing a cutoff or changing the prompt. Then compare retirement with automatic reconsideration of old evidence. The current restoration tests prove the mechanism, not the ability to find relevant history.
 
 Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, Harbor integration, and compatibility with the normal extension stack remain untested.
