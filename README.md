@@ -2,7 +2,7 @@
 
 An experimental context manager for Pi. The goal is to select useful verbatim evidence from preserved session history, reducing total cost without hurting quality or improving quality at an acceptable cost. See [DESIGN.md](DESIGN.md) for the research plan.
 
-This repository currently contains the integration foundation and a deterministic retirement baseline, not a working Jev selector. It is not installed in your normal Pi setup. No paid model calls are needed to run it.
+This repository contains deterministic and Jev retirement policies. The Jev path is tested against a local API fixture, not the live service. It is not installed in your normal Pi setup. Tests need no credentials or paid model calls.
 
 ## Run the checks
 
@@ -21,7 +21,9 @@ Tests start a local OpenAI-compatible HTTP fixture on `127.0.0.1` and run the ac
 - `src/history.ts` resolves tool observations to active-branch session entries, validates selections, and constructs deterministic views.
 - `src/extension.ts` connects the view to Pi's context and provider hooks. It records selections, explicit stops, and Pi-normalized usage as custom session entries.
 - `src/budget.ts` checks the outgoing text request against a conservative size estimate and its explicit output allowance.
-- `src/retirement.ts` retires eligible observations oldest-first when the outgoing request exceeds that budget.
+- `src/retirement.ts` prepares the shared candidate pool and applies a retirement ordering to the outgoing payload.
+- `src/judge-state.ts` assembles the task state and per-candidate relevance questions without truncating them.
+- `src/jev.ts` calls the pinned Jev API once, validates its answers, and captures usage and failure outcomes.
 - `test/` contains unit fixtures and actual SDK lifecycle tests. `test/extension.test.ts` shows how the extension factory is loaded in isolation.
 
 Load the factory explicitly in an isolated Pi SDK setup, with native automatic compaction disabled.
@@ -35,7 +37,23 @@ createContextExtension({
 
 These budget values are examples, not calibrated defaults. The policy preserves the recorded view until the full serialized request exceeds the budget. It then retires visible, eligible observations in capture order until the request fits. It skips any observation whose stub would not shrink the request. If retirement cannot make the request fit, dispatch stops and no proposed selection is recorded. This policy does not restore evidence automatically.
 
-For integration tests, `policy: 'scripted-v1'` accepts an optional `select` callback. Omitting it or returning `null` reuses the recorded view. The two policies cannot run together in one extension instance. Both honor existing branch-owned selections on resume, regardless of which policy recorded them.
+For integration tests, `policy: 'scripted-v1'` accepts an optional `select` callback. Omitting it or returning `null` reuses the recorded view. Each extension instance uses one policy. All policies honor existing branch-owned selections on resume, regardless of which policy recorded them.
+
+## Jev retirement
+
+`policy: 'jev-v1'` adds a required `jev` configuration. The caller supplies `apiKey`, `retireBelow`, and `timeoutMs`. There is no default relevance cutoff and no automatic credential lookup. `timeoutMs` must be between 1 and 60,000. An optional `endpoint` supports the local fixture. The default is `https://api.typesafe.ai/v1/systemone`, and redirects are refused.
+
+The policy sends one batch of Noul relevance questions to `jev-1.13.0`, only under the same context pressure as oldest-first. Both policies use the same eligible, visible observations whose stubs shrink the serialized request. An unchanged view that fits does not call Jev. A request with no eligible candidates also skips Jev.
+
+Jev candidates are ordered by increasing relevance, with capture order breaking ties. Only scores strictly below `retireBelow` can be retired. If those candidates cannot make the request fit, the coding-model request stops. There is no fallback to higher-rated evidence or oldest-first. A low score is not a calibrated probability that removal is safe. The tests use a cutoff of 0.2 only to exercise the code, not as a recommended setting.
+
+**Judge state.** Version `unfinished-task-v1` includes system/developer text from the outgoing payload, all user messages and corrections, and assistant narrative and tool calls in conversation order. Extension messages and command output retain distinct origins. Assistant thinking and provider signatures are omitted. Visible tool observations outside the candidate pool remain contextual evidence; already-retired results are omitted. Each candidate appears in its own structured question, with its tool call, capture time, status, and verified model-visible text. Images are represented only as omitted-image markers and remain ineligible for retirement. Questions target the unfinished task, not only the latest action. This representation and the prompt's instruction/data separation have fixture coverage, not demonstrated resistance to live prompt injection or missed cross-candidate dependencies.
+
+**Bounds.** One full batch must fit local caps of 30,000 UTF-8 JSON bytes for state plus any one question and 60,000 bytes for the complete request. These are conservative proxies for Jev's documented 32k/64k token limits, not a tokenizer. If the state or whole candidate pool exceeds a cap, the attempt stops before network access. No instructions, observations, or candidate subset are silently clipped. This deliberately limits the first policy to small-history experiments. There are no retries, including for HTTP 429/529, no substitute judge, and no summary fallback.
+
+**Judge records.** A branch-owned `jev-context/judge-start` entry precedes the HTTP call. It records the request ID, model and prompt versions, endpoint, cutoff, candidate IDs, byte counts, request hash, and price schedule, but not the API key or a second copy of the prompt. A matching `jev-context/judge-result` records the outcome, latency, response model, raw usage, relevance scores, and nullable priced cost estimate. Malformed answers, missing usage, or a model-version mismatch reject the entire decision. Available usage is retained even when a decision fails or the coding request still cannot fit.
+
+Cancellation never installs a partial selection. If the branch moves during the HTTP call, no result or selection is written onto the new branch. The original branch retains an unmatched start entry whose outcome and incurred cost remain unknown. Even a matched result with unavailable usage has unknown cost, not zero. Costs computed from reported usage use the documented $0.042 per million input tokens and free output, checked on 2026-09-21. They are estimates, not reconciled charges.
 
 ## Behavior proved locally
 
@@ -48,7 +66,8 @@ Tests demonstrate the following properties against Pi 0.85.1 and the local fixtu
 - Scripted restoration returns original text at its original position with a historical label. It does not rerun tools.
 - Unknown evidence, ambiguous tool identities, and modified incoming tool results fail explicitly. Interrupted exchanges stay protected, and the session can continue using Pi's existing provider-side protocol repair without changing stored evidence.
 - Cancellation and rejected selections do not install partial decisions. A final-payload budget rejection does not commit the proposed selection or send an HTTP request.
-- Under pressure, oldest-first retirement changes only the selected tool-result text in the actual provider request. Newly produced observations stay visible for the next model response. Resume reproduces the selected prefix without another decision when the request still fits.
+- Under pressure, retirement changes only the selected tool-result text in the actual provider request. Newly produced observations stay visible for the next model response. Resume reproduces the selected prefix without another decision when the request still fits.
+- Fixture Jev scores can preserve older evidence while retiring a newer eligible result. Scores at the cutoff, invalid responses, cancellation, and oversized judge inputs cannot force a retirement. Judge failures are recorded separately from coding-request budget stops.
 - Disabling native automatic compaction prevents summarization and retry after a simulated provider overflow.
 - Input, output, cache, and cost fields exposed by Pi are captured with the request's budget measurement.
 
@@ -72,6 +91,6 @@ These checks do not establish live cache hits, Jev selection quality, or monetar
 
 ## Next stage
 
-Implement one Jev retirement policy under the same pressure trigger, eligibility, and budget rules as the deterministic baseline. Then compare retirement with automatic reconsideration of old evidence. The current restoration tests prove the mechanism, not the ability to find relevant history.
+Validate the live Jev contract and calibrate the state, questions, and cutoff on small development fixtures before interpreting relevance scores. Then compare retirement with automatic reconsideration of old evidence. The current restoration tests prove the mechanism, not the ability to find relevant history.
 
 Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, Harbor integration, and compatibility with the normal extension stack remain untested.

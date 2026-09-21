@@ -3,7 +3,9 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import type { ExtensionContext, ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import { measureRequest, type BudgetMeasurement, type RequestBudget } from './budget.ts';
-import { retireOldest } from './retirement.ts';
+import { applyRetirement, prepareRetirement } from './retirement.ts';
+import { prepareJevRequest } from './judge-state.ts';
+import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
 import {
   buildView, readHistory, SELECTION_ENTRY, validateSelection,
   type HistoryView, type SelectionRecord,
@@ -11,9 +13,12 @@ import {
 
 export const STOP_ENTRY = 'jev-context/stop';
 export const USAGE_ENTRY = 'jev-context/usage';
+export const JUDGE_START_ENTRY = 'jev-context/judge-start';
+export const JUDGE_RESULT_ENTRY = 'jev-context/judge-result';
 
 export type ContextOptions = { budget: RequestBudget } & (
   | { policy: 'oldest-first-v1'; select?: never }
+  | { policy: 'jev-v1'; jev: JevConfig; select?: never }
   | {
     policy: 'scripted-v1';
     /** Integration seam. Omitted or null reuses the recorded view without a fresh decision. */
@@ -50,12 +55,13 @@ interface Attempt {
 
 /** Explicitly loaded by the isolated SDK harness, not installed in the user's Pi. */
 export function createContextExtension(options: ContextOptions): ExtensionFactory {
-  if (options.policy !== 'oldest-first-v1' && options.policy !== 'scripted-v1') {
+  if (options.policy !== 'oldest-first-v1' && options.policy !== 'scripted-v1' && options.policy !== 'jev-v1') {
     throw new Error('Unsupported selection policy');
   }
-  if (options.policy === 'oldest-first-v1' && options.select !== undefined) {
-    throw new Error('Oldest-first retirement cannot use a scripted selector');
+  if (options.policy !== 'scripted-v1' && options.select !== undefined) {
+    throw new Error('Automatic retirement cannot use a scripted selector');
   }
+  if (options.policy === 'jev-v1') validateJevConfig(options.jev);
   return (pi) => {
     let attempt: Attempt | undefined;
 
@@ -64,14 +70,14 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
         ctx.sessionManager.getLeafId() === current.leafId;
     }
 
-    function stop(ctx: ExtensionContext, current: Attempt, reason: string) {
+    function stop(ctx: ExtensionContext, current: Attempt, reason: string, kind?: 'judge') {
       current.stopped = true;
       current.cancelled = ctx.signal?.aborted ?? false;
       ctx.abort();
       if (sameBranch(ctx, current)) {
         pi.appendEntry(STOP_ENTRY, {
           version: 1, requestId: current.id, reason,
-          kind: current.cancelled ? 'cancelled' : current.budget?.fits === false ? 'budget' : 'invalid',
+          kind: current.cancelled ? 'cancelled' : kind ?? (current.budget?.fits === false ? 'budget' : 'invalid'),
           budget: current.budget ?? null,
         });
         current.leafId = ctx.sessionManager.getLeafId();
@@ -110,7 +116,7 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
       }
     });
 
-    pi.on('before_provider_request', (event, ctx) => {
+    pi.on('before_provider_request', async (event, ctx) => {
       const current = attempt;
       if (!current) {
         ctx.abort();
@@ -118,14 +124,42 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
       }
       if (current.stopped) { ctx.abort(); return; }
       try {
-        if (ctx.signal?.aborted) throw new Error('Request cancelled');
+        const signal = ctx.signal;
+        if (!signal) throw new Error('Provider request requires an active run');
+        signal.throwIfAborted();
         if (!sameBranch(ctx, current)) throw new Error('Session branch changed before provider request');
         if (!ctx.model) throw new Error('Missing model');
         let payload = event.payload;
-        if (options.policy === 'oldest-first-v1') {
+        if (options.policy !== 'scripted-v1') {
           if (!current.view) throw new Error('Missing context view');
           const { history, messages } = current.view;
-          const proposal = retireOldest(payload, messages, history, ctx.model, options.budget);
+          const plan = prepareRetirement(payload, messages, history, ctx.model, options.budget);
+          current.budget = plan.before;
+          let order = plan.candidates.map((candidate) => candidate.evidence.id);
+          if (options.policy === 'jev-v1' && !plan.before.fits && order.length) {
+            const prepared = prepareJevRequest(plan, messages);
+            pi.appendEntry(JUDGE_START_ENTRY, {
+              version: 1, requestId: current.id, sourceLeafId: current.leafId,
+              policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION,
+              endpoint: options.jev.endpoint ?? JEV_ENDPOINT,
+              candidateIds: order, retireBelow: options.jev.retireBelow, timeoutMs: options.jev.timeoutMs,
+              requestBytes: prepared.requestBytes, maxPairBytes: prepared.maxPairBytes,
+              requestHash: prepared.requestHash, priceSchedule: JEV_PRICE,
+            });
+            current.leafId = ctx.sessionManager.getLeafId();
+            const judged = await evaluateJev(prepared.request, options.jev, signal);
+            if (!sameBranch(ctx, current)) throw new Error('Session branch changed during Jev evaluation');
+            pi.appendEntry(JUDGE_RESULT_ENTRY, { version: 1, requestId: current.id, ...judged });
+            current.leafId = ctx.sessionManager.getLeafId();
+            signal.throwIfAborted();
+            if (judged.outcome !== 'ok' || !judged.relevance) {
+              throw new JevError(`Jev evaluation failed (${judged.outcome})`);
+            }
+            const relevance = judged.relevance;
+            order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
+              .sort((a, b) => relevance[a]! - relevance[b]!);
+          }
+          const proposal = applyRetirement(plan, order, ctx.model, options.budget);
           payload = proposal.payload;
           current.budget = proposal.budget;
           if (proposal.retiredIds.length > history.retiredIds.length) {
@@ -144,7 +178,7 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
         }
         return payload;
       } catch (error) {
-        stop(ctx, current, error instanceof Error ? error.message : String(error));
+        stop(ctx, current, error instanceof Error ? error.message : String(error), error instanceof JevError ? 'judge' : undefined);
       }
     });
 
