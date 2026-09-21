@@ -159,6 +159,10 @@ function truncationStatus(result: ToolResultMessage): string {
   return truncation.truncated === true ? 'yes' : truncation.truncated === false ? 'no' : 'unknown';
 }
 
+export function retirementText(item: Evidence): string {
+  return `[jev-context: retired observation ${item.id}; status=${item.result.isError ? 'error' : 'success'}; truncated=${truncationStatus(item.result)}. Original preserved in session history.]`;
+}
+
 export function buildView(messages: AgentMessage[], history: HistoryView, retiredIds: readonly string[]): AgentMessage[] {
   const retired = new Set(validateSelection(history, retiredIds));
   const historical = new Set(history.historicalIds);
@@ -170,7 +174,7 @@ export function buildView(messages: AgentMessage[], history: HistoryView, retire
     if (retired.has(item.id)) {
       return {
         ...message,
-        content: [{ type: 'text', text: `[jev-context: retired observation ${item.id}; status=${message.isError ? 'error' : 'success'}; truncated=${truncationStatus(message)}. Original preserved in session history.]` }],
+        content: [{ type: 'text', text: retirementText(item) }],
       };
     }
     if (historical.has(item.id)) {

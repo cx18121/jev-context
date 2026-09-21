@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import type { ExtensionContext, ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import { measureRequest, type BudgetMeasurement, type RequestBudget } from './budget.ts';
+import { retireOldest } from './retirement.ts';
 import {
   buildView, readHistory, SELECTION_ENTRY, validateSelection,
   type HistoryView, type SelectionRecord,
@@ -10,12 +12,14 @@ import {
 export const STOP_ENTRY = 'jev-context/stop';
 export const USAGE_ENTRY = 'jev-context/usage';
 
-export interface ContextOptions {
-  policy: string;
-  budget: RequestBudget;
-  /** Integration seam for scripted selections. Null reuses the recorded view. No live judge yet. */
-  select?: (history: HistoryView, signal: AbortSignal) => Promise<string[] | null> | string[] | null;
-}
+export type ContextOptions = { budget: RequestBudget } & (
+  | { policy: 'oldest-first-v1'; select?: never }
+  | {
+    policy: 'scripted-v1';
+    /** Integration seam. Omitted or null reuses the recorded view without a fresh decision. */
+    select?: (history: HistoryView, signal: AbortSignal) => Promise<string[] | null> | string[] | null;
+  }
+);
 
 export interface UsageRecord {
   version: 1;
@@ -37,6 +41,7 @@ interface Attempt {
   sessionId: string;
   leafId: string | null;
   selection?: SelectionRecord;
+  view?: { history: HistoryView; messages: AgentMessage[] };
   budget?: BudgetMeasurement;
   stopped: boolean;
   cancelled: boolean;
@@ -45,7 +50,12 @@ interface Attempt {
 
 /** Explicitly loaded by the isolated SDK harness, not installed in the user's Pi. */
 export function createContextExtension(options: ContextOptions): ExtensionFactory {
-  if (!options.policy) throw new Error('A versioned policy identifier is required');
+  if (options.policy !== 'oldest-first-v1' && options.policy !== 'scripted-v1') {
+    throw new Error('Unsupported selection policy');
+  }
+  if (options.policy === 'oldest-first-v1' && options.select !== undefined) {
+    throw new Error('Oldest-first retirement cannot use a scripted selector');
+  }
   return (pi) => {
     let attempt: Attempt | undefined;
 
@@ -82,7 +92,8 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
         if (!signal) throw new Error('Context selection requires an active run');
         signal.throwIfAborted();
         const history = readHistory(structuredClone(ctx.sessionManager.getBranch()), event.messages);
-        const proposed = options.select ? await options.select(structuredClone(history), signal) : null;
+        const proposed = options.policy === 'scripted-v1' && options.select
+          ? await options.select(structuredClone(history), signal) : null;
         signal.throwIfAborted();
         if (!sameBranch(ctx, current)) throw new Error('Session branch changed during selection');
         const retiredIds = validateSelection(history, proposed ?? history.retiredIds);
@@ -90,7 +101,9 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
             JSON.stringify(retiredIds) !== JSON.stringify([...history.retiredIds].sort()))) {
           current.selection = { version: 1, policy: options.policy, sourceLeafId: current.leafId, retiredIds };
         }
-        return { messages: buildView(event.messages, history, retiredIds) };
+        const messages = buildView(event.messages, history, retiredIds);
+        current.view = { history, messages };
+        return { messages };
       } catch (error) {
         stop(ctx, current, error instanceof Error ? error.message : String(error));
         return { messages: event.messages };
@@ -108,12 +121,28 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
         if (ctx.signal?.aborted) throw new Error('Request cancelled');
         if (!sameBranch(ctx, current)) throw new Error('Session branch changed before provider request');
         if (!ctx.model) throw new Error('Missing model');
-        current.budget = measureRequest(event.payload, ctx.model, options.budget);
+        let payload = event.payload;
+        if (options.policy === 'oldest-first-v1') {
+          if (!current.view) throw new Error('Missing context view');
+          const { history, messages } = current.view;
+          const proposal = retireOldest(payload, messages, history, ctx.model, options.budget);
+          payload = proposal.payload;
+          current.budget = proposal.budget;
+          if (proposal.retiredIds.length > history.retiredIds.length) {
+            current.selection = {
+              version: 1, policy: options.policy, sourceLeafId: current.leafId,
+              retiredIds: proposal.retiredIds,
+            };
+          }
+        } else {
+          current.budget = measureRequest(payload, ctx.model, options.budget);
+        }
         if (!current.budget.fits) throw new Error('Selected request exceeds the context budget');
         if (current.selection) {
           pi.appendEntry(SELECTION_ENTRY, current.selection);
           current.leafId = ctx.sessionManager.getLeafId();
         }
+        return payload;
       } catch (error) {
         stop(ctx, current, error instanceof Error ? error.message : String(error));
       }
