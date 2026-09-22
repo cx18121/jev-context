@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { sanitizeSurrogates } from '@earendil-works/pi-ai/utils/sanitize-unicode';
+import { mapProviderEvidence } from './provider-view.ts';
 import { measureRequest, type BudgetMeasurement, type RequestBudget } from './budget.ts';
 import { retirementText, validateSelection, type Evidence, type HistoryView } from './history.ts';
 
@@ -33,33 +33,11 @@ export function prepareRetirement(
   const candidates: RetirementCandidate[] = [];
   if (before.fits) return { payload, history, before, candidates };
 
-  // measureRequest validated this text-only provider shape.
-  const request = payload as { messages: Array<Record<string, unknown>> };
-  const wireResults = new Map<unknown, number[]>();
-  request.messages.forEach((message, index) => {
-    if (message.role !== 'tool') return;
-    const matches = wireResults.get(message.tool_call_id) ?? [];
-    matches.push(index);
-    wireResults.set(message.tool_call_id, matches);
-  });
-  const visibleResults = new Map(messages
-    .filter((message) => message.role === 'toolResult')
-    .map((message) => [message.toolCallId, message]));
-  for (const item of history.evidence) {
-    if (item.protectedReason || retired.has(item.id)) continue;
-    const visible = visibleResults.get(item.result.toolCallId);
-    const matches = wireResults.get(item.result.toolCallId);
-    if (!visible || matches?.length !== 1) {
-      throw new Error(`Cannot map evidence to a unique provider tool result: ${item.id}`);
-    }
-    const messageIndex = matches[0]!;
-    const wire = request.messages[messageIndex]!;
-    const text = visible.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n');
-    const expected = sanitizeSurrogates(text || '(no tool output)');
-    if (wire.content !== expected) throw new Error(`Provider tool result differs from the selected view: ${item.id}`);
-    const stub = retirementText(item);
-    const saving = Buffer.byteLength(JSON.stringify(expected), 'utf8') - Buffer.byteLength(JSON.stringify(stub), 'utf8');
-    if (saving > 0) candidates.push({ evidence: item, text: expected, stub, saving, messageIndex });
+  const eligible = history.evidence.filter((item) => !item.protectedReason && !retired.has(item.id));
+  for (const mapped of mapProviderEvidence(payload, messages, eligible)) {
+    const stub = retirementText(mapped.evidence);
+    const saving = Buffer.byteLength(JSON.stringify(mapped.text), 'utf8') - Buffer.byteLength(JSON.stringify(stub), 'utf8');
+    if (saving > 0) candidates.push({ ...mapped, stub, saving });
   }
   return { payload, history, before, candidates };
 }

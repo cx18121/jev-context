@@ -2,7 +2,7 @@
 
 An experimental context manager for Pi. The goal is to select useful verbatim evidence from preserved session history, reducing total cost without hurting quality or improving quality at an acceptable cost. See [DESIGN.md](DESIGN.md) for the research plan.
 
-This repository contains deterministic and Jev retirement policies. Local fixtures test the Pi integration. A [12-request synthetic pilot](docs/synthetic-pilot-v1.md) verified the live Jev contract and basic relevance rankings. A [24-request paired pilot](docs/paired-pilot-v1.md) showed task-sensitive scores but persistent false positives. Neither measured coding-task accuracy or savings. A [Harbor integration smoke](docs/harbor-smoke-v1.md) passed the original benchmark verifier's wrong-answer and correct-answer checks through Pi. It is not installed in your normal Pi setup. Tests need no credentials or paid model calls.
+This repository contains deterministic and Jev retirement policies plus an experimental automatic retirement-and-restoration policy. Local fixtures test the Pi integration. A [12-request synthetic pilot](docs/synthetic-pilot-v1.md) verified the live Jev contract and basic relevance rankings. A [24-request paired pilot](docs/paired-pilot-v1.md) showed task-sensitive scores but persistent false positives. Neither measured coding-task accuracy or savings. A [Harbor integration smoke](docs/harbor-smoke-v1.md) passed the original benchmark verifier's wrong-answer and correct-answer checks through Pi. It is not installed in your normal Pi setup. Tests need no credentials or paid model calls.
 
 ## Run the checks
 
@@ -24,7 +24,9 @@ Tests start a local OpenAI-compatible HTTP fixture on `127.0.0.1` and run the ac
 - `src/retirement.ts` prepares the shared candidate pool and applies a retirement ordering to the outgoing payload.
 - `src/judge-state.ts` assembles the task state and per-candidate relevance questions without truncating them.
 - `src/jev.ts` calls the pinned Jev API once, validates its answers, and captures usage and failure outcomes.
-- `src/retrieval.ts` shortlists archived observations for future reconsideration. It is not connected to automatic selection yet.
+- `src/retrieval.ts` shortlists archived observations for reconsideration.
+- `src/selection.ts` detects unprocessed user/tool events and assembles atomic retirement-and-restoration proposals.
+- `src/provider-view.ts` verifies evidence mappings and reproduces Pi's text serialization for changed results.
 - `test/` contains unit fixtures and actual SDK lifecycle tests. `test/extension.test.ts` shows how the extension factory is loaded in isolation.
 
 Load the factory explicitly in an isolated Pi SDK setup, with native automatic compaction disabled.
@@ -56,6 +58,22 @@ Jev candidates are ordered by increasing relevance, with capture order breaking 
 
 Cancellation never installs a partial selection. If the branch moves during the HTTP call, no result or selection is written onto the new branch. The original branch retains an unmatched start entry whose outcome and incurred cost remain unknown. Even a matched result with unavailable usage has unknown cost, not zero. Costs computed from reported usage use the documented $0.042 per million input tokens and free output, checked on 2026-09-21. They are estimates, not reconciled charges.
 
+## Automatic reconsideration
+
+`policy: 'jev-select-v1'` uses the same Jev client, relevance question, protected content, provider mapping, and request budget. It adds a required `selection` configuration containing `archiveLimit` and `restoreAtOrAbove`. The archive limit must be a positive safe integer. The restoration cutoff must be greater than `jev.retireBelow` and at most 1. Neither setting has a default or a calibrated recommendation.
+
+When retired evidence exists, a new user message or completed tool exchange gives it a reconsideration opportunity, even when the current request fits. The last successful selection is the active branch's event checkpoint. Resuming or continuing the same checkpointed history does not itself trigger another judgment. An absent checkpoint or a last selection from another policy makes existing events eligible for reconsideration. Multiple pending events are handled in one batch. Incomplete exchanges do not trigger restoration.
+
+The batch contains the bounded lexical archive shortlist and all eligible, shrinkable visible observations. Code restores every archived candidate scoring at or above `restoreAtOrAbove`, at its original position with a historical label. It then retires visible candidates scoring strictly below `retireBelow`, lowest score first, only as needed to make the complete request fit. Newly restored evidence cannot be retired again within that decision. A later event can judge it again. Intermediate scores preserve the existing visibility state. The threshold gap is an experimental policy, not a guarantee against oscillation across changing judgments.
+
+The complete proposal is validated before its selected set and event checkpoint are committed. This includes pure restores, same-size swaps, and successful no-op reconsiderations. A zero-match lookup on a fitting request records a checkpoint without calling Jev. With no fresh event, only context pressure can trigger retirement. With no archived evidence, behavior is pressure-triggered retirement. Existing `oldest-first-v1` and `jev-v1` remain separate comparison policies.
+
+**Failure behavior.** If selected restorations cannot fit after the permitted retirements, dispatch stops and the old selection stays recorded. A stop record includes the proposed restored and retired IDs and complete budget measurement. Oversized judge inputs, timeouts, and invalid responses also stop explicitly, even when the previous view would have fit. There is no skip-and-continue fallback and no automatic retry. Failed attempts do not consume the event checkpoint. Manually retrying the same state can repeat the failure and incur another judge charge. This strict experimental behavior is not a daily-use readiness claim.
+
+Judge-start, selection, and stop records carry applicable reconsideration metadata, including event entry IDs, retrieval version, pool/match counts, shortlist IDs and limit, and restoration cutoff. The ordinary selection record still owns the full retired set. Diagnostic metadata does not introduce another state store. Candidate count does not bound judge bytes; the existing full-batch byte caps still apply. Missing archive candidates remain a retrieval limitation, not evidence that no useful history exists.
+
+Local SDK tests exercise user and tool-loop triggers, original-text restoration without tool execution, unchanged prefixes, extracted resume checkpoints, atomic swaps, insufficient space, zero matches, oversized inputs, judge failure, cancellation, and successful late responses after a branch move. They use scripted model and judge responses. They establish integration behavior, not real relevance quality, cache hits, task accuracy, or savings. Normal-stack compatibility and installation remain out of scope.
+
 ## Archive lookup diagnostics
 
 `retrieveArchive(history, messages, maxCandidates)` returns a bounded shortlist of currently retired, eligible observations from a validated active-branch history. It neither restores them nor calls Jev. It reads complete original text and tool metadata, not retirement stubs. Visible and off-branch observations cannot enter the archive pool. The caller supplies the original messages used to build that history and an explicit positive shortlist limit.
@@ -70,7 +88,7 @@ This offline command prints a deterministic JSON coverage report over 11 authore
 
 The initial diagnostic finds all authored relevant observations in seven cases, including task detours, metadata-only matches, buried text, and a distinctive identifier in archives of 8, 64, and 256 observations. Four cases deliberately expose limitations. A synonym dependency has no lexical match; an obsolete requirement outranks its correction; a one-item shortlist cannot include two required observations; and a shared `.txt` extension admits an unrelated earlier result ahead of the required one. These misses are retained as diagnostics, not hidden by tuning the fixtures. Finding every relevant observation does not mean the shortlist contains no irrelevant ones.
 
-The limit bounds returned candidate count, not search work or judge-input bytes. Lookup still scans the archive and sorts matches. It provides no logarithmic-search, latency, task-accuracy, injection-resistance, or savings evidence. A later selection policy must handle retrieval misses and actual request limits separately. The extension's pressure-triggered retirement behavior is unchanged.
+The limit bounds returned candidate count, not search work or judge-input bytes. Lookup still scans the archive and sorts matches. It provides no logarithmic-search, latency, task-accuracy, injection-resistance, or savings evidence. A later selection policy must handle retrieval misses and actual request limits separately. The retirement-only policies remain pressure-triggered. The automatic reconsideration policy consumes this lookup without changing its ranking.
 
 ## Behavior proved locally
 
@@ -145,6 +163,6 @@ The adapter uploads only the package manifests, `src/*.ts`, and two frontend fil
 
 ## Next stage
 
-Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration of retired evidence remains the next product capability. The standalone archive lookup now has coverage diagnostics, including explicit misses, but is not wired into the extension. Current restoration tests prove the mechanism, not an automatic end-to-end policy. Refresh timing and behavior when relevant evidence cannot fit remain unresolved before that integration.
+Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration is now integrated as the separate `jev-select-v1` policy, with local SDK proof and explicit retrieval-miss diagnostics. Its event timing and strict cannot-fit stops are experimental choices. The next evidence gap is actual agent trajectories comparing retirement alone with retirement plus restoration, not another synthetic relevance score alone.
 
 Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, and compatibility with the normal extension stack remain untested.

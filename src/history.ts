@@ -21,6 +21,7 @@ export interface Evidence {
 
 export interface HistoryView {
   evidence: Evidence[];
+  newestExchangeIds: string[];
   retiredIds: string[];
   historicalIds: string[];
   lastSelection: SelectionRecord | null;
@@ -134,6 +135,7 @@ export function readHistory(branch: SessionEntry[], messages: AgentMessage[]): H
   if (evidence.length !== results.size) throw new Error('Working history is missing original tool results');
   return {
     evidence,
+    newestExchangeIds: newestExchange,
     retiredIds: lastSelection?.retiredIds ?? [],
     historicalIds: [...historicalIds],
     lastSelection,

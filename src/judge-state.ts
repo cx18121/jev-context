@@ -3,7 +3,13 @@ import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 import { JevError, JEV_MODEL, type JevRequest } from './jev.ts';
-import type { RetirementPlan } from './retirement.ts';
+import type { Evidence, HistoryView } from './history.ts';
+
+export interface JudgeInput {
+  payload: unknown;
+  history: HistoryView;
+  candidates: Array<{ evidence: Evidence; text: string }>;
+}
 
 // Conservative byte caps, not a Jev tokenizer or a proof of its token limits.
 export const JEV_PAIR_BYTES = 30_000;
@@ -14,7 +20,7 @@ function textContent(content: string | (TextContent | ImageContent)[]) {
     block.type === 'text' ? { type: 'text', text: block.text } : { type: 'omitted-image' });
 }
 
-export function prepareJevRequest(plan: RetirementPlan, messages: AgentMessage[]) {
+export function prepareJevRequest(plan: JudgeInput, messages: AgentMessage[]) {
   const candidateIds = new Set(plan.candidates.map((candidate) => candidate.evidence.id));
   const retiredIds = new Set(plan.history.retiredIds);
   const evidence = new Map(plan.history.evidence.map((item) => [item.result.toolCallId, item]));
