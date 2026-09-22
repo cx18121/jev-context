@@ -19,7 +19,7 @@ export interface FixtureRequest {
   [key: string]: unknown;
 }
 
-export async function createPiFixture() {
+export async function createPiFixture(onRequest?: (request: FixtureRequest) => void) {
   const directory = await mkdtemp(join(tmpdir(), 'jev-context-'));
   const requests: FixtureRequest[] = [];
   const toolResponses: Array<Array<{ id: string; name: string; arguments: Record<string, unknown> }>> = [];
@@ -27,7 +27,9 @@ export async function createPiFixture() {
   const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
-    requests.push(JSON.parse(body) as FixtureRequest);
+    const payload = JSON.parse(body) as FixtureRequest;
+    requests.push(payload);
+    onRequest?.(payload);
     if (overflow) {
       response.writeHead(400, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { message: 'maximum context length exceeded', type: 'invalid_request_error', code: 'context_length_exceeded' } }));

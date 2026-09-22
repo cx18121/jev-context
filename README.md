@@ -90,6 +90,22 @@ The initial diagnostic finds all authored relevant observations in seven cases, 
 
 The limit bounds returned candidate count, not search work or judge-input bytes. Lookup still scans the archive and sorts matches. It provides no logarithmic-search, latency, task-accuracy, injection-resistance, or savings evidence. A later selection policy must handle retrieval misses and actual request limits separately. The retirement-only policies remain pressure-triggered. The automatic reconsideration policy consumes this lookup without changing its ranking.
 
+## ContextBench evidence diagnostics
+
+```sh
+npm run eval:contextbench
+```
+
+This offline command prints an authored fixture report, not a benchmark result. It demonstrates a reference line being read, retired, then restored. Cumulative discovered coverage stays at 1 after the read while currently visible coverage falls to 0 and returns to 1. It makes no network requests and loads no credentials. Separate tests run real Pi reads against the local HTTP fixture and capture the actual received requests, proving the same behavior without re-executing a restored observation.
+
+`eval/contextbench.ts` owns three boundaries. `captureRequest` checks original branch evidence against the selected tool text actually dispatched, including retirement stubs and historical restoration labels. It records payload/source hashes, evidence identities, visibility and source mappings. `analyzeCaptures` receives evaluator-only reference spans after capture and reports discovery, current visibility, observed retirement/restoration transitions and unmapped reasons. `exportDiscovery` emits the discovery-step shape accepted by [ContextBench's parser](https://github.com/EuniAI/ContextBench/blob/1436c28a8eb95496da4ea69ad458b9f8a8eb7d61/contextbench/parsers/trajectory.py), not an official evaluation or final patch-context prediction.
+
+**Mapping.** Only successful, untruncated text `read` results can map to base-source lines. The mapper reproduces Pi 0.85.1's range selection and footer using its pinned truncation helper, requires exact original-text equality, then excludes the trailing empty pseudo-line. Restored results map from their preserved originals after the historical wire label is verified separately. Shell output, unavailable source, errors and changed content stay explicitly unmapped. Matching base lines does not prove that historical content describes the current filesystem. The source snapshot is evaluator input, not additional context sent to the agent or Jev.
+
+**Meaning and limits.** Discovery means a tool observation exists in captured branch history, not proof that the model used it. Coverage unions overlapping and adjacent mapped lines. It is a mapped lower bound with separate unknown counts, not an estimate that unmapped evidence is irrelevant. No reference lines yields `null`, not perfect coverage. No captured requests yields `no-captures`. The first capture has unknown prior transitions. Later captures must extend the same session branch and source snapshot. Capture IDs belong to the transport observer and are not extension usage IDs. Only received HTTP requests are counted. Budget stops, missing transport captures, task correctness and costs need separate run accounting before any campaign.
+
+**Export boundary.** Discovery steps contain newly recorded observations per captured request, including empty steps. Restorations do not count as new reads. These request boundaries differ from upstream retrieval steps, so AUC and redundancy would not be leaderboard-comparable. Final context and model patch fields are deliberately absent. Do not feed this export directly to the full upstream evaluator. At the pinned revision it can substitute a gold patch for a missing model patch when computing EditLoc and exclude error cases from aggregate scores. The bridge neither invokes that evaluator nor reports official metrics. Gold annotations are never capture inputs, and no actual ContextBench task or gold solution has been run or inspected for this fixture.
+
 ## Behavior proved locally
 
 Tests demonstrate the following properties against Pi 0.85.1 and the local fixture.
@@ -163,6 +179,6 @@ The adapter uploads only the package manifests, `src/*.ts`, and two frontend fil
 
 ## Next stage
 
-Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration is now integrated as the separate `jev-select-v1` policy, with local SDK proof and explicit retrieval-miss diagnostics. Its event timing and strict cannot-fit stops are experimental choices. The next evidence gap is actual agent trajectories comparing retirement alone with retirement plus restoration, not another synthetic relevance score alone.
+Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration is now integrated as the separate `jev-select-v1` policy, with local SDK proof and explicit retrieval-miss diagnostics. Its event timing and strict cannot-fit stops are experimental choices. The local ContextBench bridge now distinguishes discovered from model-visible evidence, with explicit unmapped observations. The next evidence gap is a native task-environment and correctness-grader integration for the SWE-Bench Verified-derived ContextBench subset, followed by actual agent trajectories comparing retirement alone with retirement plus restoration. Authored diagnostics do not establish task accuracy or savings.
 
 Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, and compatibility with the normal extension stack remain untested.
