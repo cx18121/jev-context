@@ -24,6 +24,7 @@ Tests start a local OpenAI-compatible HTTP fixture on `127.0.0.1` and run the ac
 - `src/retirement.ts` prepares the shared candidate pool and applies a retirement ordering to the outgoing payload.
 - `src/judge-state.ts` assembles the task state and per-candidate relevance questions without truncating them.
 - `src/jev.ts` calls the pinned Jev API once, validates its answers, and captures usage and failure outcomes.
+- `src/retrieval.ts` shortlists archived observations for future reconsideration. It is not connected to automatic selection yet.
 - `test/` contains unit fixtures and actual SDK lifecycle tests. `test/extension.test.ts` shows how the extension factory is loaded in isolation.
 
 Load the factory explicitly in an isolated Pi SDK setup, with native automatic compaction disabled.
@@ -54,6 +55,22 @@ Jev candidates are ordered by increasing relevance, with capture order breaking 
 **Judge records.** A branch-owned `jev-context/judge-start` entry precedes the HTTP call. It records the request ID, model and prompt versions, endpoint, cutoff, candidate IDs, byte counts, request hash, and price schedule, but not the API key or a second copy of the prompt. A matching `jev-context/judge-result` records the outcome, latency, response model, raw usage, relevance scores, and nullable priced cost estimate. Malformed answers, missing usage, or a model-version mismatch reject the entire decision. Available usage is retained even when a decision fails or the coding request still cannot fit.
 
 Cancellation never installs a partial selection. If the branch moves during the HTTP call, no result or selection is written onto the new branch. The original branch retains an unmatched start entry whose outcome and incurred cost remain unknown. Even a matched result with unavailable usage has unknown cost, not zero. Costs computed from reported usage use the documented $0.042 per million input tokens and free output, checked on 2026-09-21. They are estimates, not reconciled charges.
+
+## Archive lookup diagnostics
+
+`retrieveArchive(history, messages, maxCandidates)` returns a bounded shortlist of currently retired, eligible observations from a validated active-branch history. It neither restores them nor calls Jev. It reads complete original text and tool metadata, not retirement stubs. Visible and off-branch observations cannot enter the archive pool. The caller supplies the original messages used to build that history and an explicit positive shortlist limit.
+
+Version `token-overlap-v1` queries all user text, the latest non-interrupted assistant narrative and tool arguments, and the tool arguments for text-only observations in the newest complete exchange. It excludes assistant thinking, tool-result bodies, images, and extension messages from the query. Candidate documents include their tool name, argument values, and whole text. Matching splits camelCase and punctuation, ignores single-character terms, and weights distinct matching terms by their frequency across the archive. Repetition gives no extra weight. Capture order breaks ties; zero-match results are not padded into the shortlist. This is a simple lexical baseline, not semantic relevance, BM25, or a calibrated score. Old instructions remain searchable even when corrected. The lookup cannot resolve supersession.
+
+```sh
+npm run eval:retrieval
+```
+
+This offline command prints a deterministic JSON coverage report over 11 authored development cases. Expected labels and rationale stay outside retrieval inputs. The report compares the shortlist with all authored relevant observations in the archive, then uses the uncapped lexical ranking to distinguish no-match misses from shortlist-cutoff misses. The full archive is a coverage reference, not a model oracle. No credentials, Jev calls, coding-model calls, or session files are used.
+
+The initial diagnostic finds all authored relevant observations in seven cases, including task detours, metadata-only matches, buried text, and a distinctive identifier in archives of 8, 64, and 256 observations. Four cases deliberately expose limitations. A synonym dependency has no lexical match; an obsolete requirement outranks its correction; a one-item shortlist cannot include two required observations; and a shared `.txt` extension admits an unrelated earlier result ahead of the required one. These misses are retained as diagnostics, not hidden by tuning the fixtures. Finding every relevant observation does not mean the shortlist contains no irrelevant ones.
+
+The limit bounds returned candidate count, not search work or judge-input bytes. Lookup still scans the archive and sorts matches. It provides no logarithmic-search, latency, task-accuracy, injection-resistance, or savings evidence. A later selection policy must handle retrieval misses and actual request limits separately. The extension's pressure-triggered retirement behavior is unchanged.
 
 ## Behavior proved locally
 
@@ -128,6 +145,6 @@ The adapter uploads only the package manifests, `src/*.ts`, and two frontend fil
 
 ## Next stage
 
-Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration of retired evidence remains the next product capability; current restoration tests prove the mechanism, not the ability to find relevant history.
+Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration of retired evidence remains the next product capability. The standalone archive lookup now has coverage diagnostics, including explicit misses, but is not wired into the extension. Current restoration tests prove the mechanism, not an automatic end-to-end policy. Refresh timing and behavior when relevant evidence cannot fit remain unresolved before that integration.
 
 Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, and compatibility with the normal extension stack remain untested.
