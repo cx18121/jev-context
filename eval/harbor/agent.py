@@ -1,8 +1,6 @@
 """Harbor owns the sandbox and verifier; this adapter installs our isolated Pi frontend."""
-import hashlib
 import json
 import shlex
-import tarfile
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -11,29 +9,15 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.options import InstalledAgentOptions
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from eval.bundle import make_bundle as pack_bundle, runtime_files
 
 ROOT = Path(__file__).resolve().parents[2]
 REMOTE = "/installed-agent/jev"
 NODE = "22.22.3"
 
 
-def bundle_files(root: Path) -> list[Path]:
-    files = [root / "package.json", root / "package-lock.json", *sorted((root / "src").glob("*.ts")),
-             root / "eval/harbor/driver.ts", root / "eval/harbor/script.ts"]
-    for path in files:
-        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
-            raise ValueError(f"Invalid bundle file: {path}")
-    return files
-
-
 def make_bundle(root: Path, destination: Path) -> dict[str, str]:
-    hashes = {}
-    with tarfile.open(destination, "w:gz") as archive:
-        for path in bundle_files(root):
-            name = path.relative_to(root).as_posix()
-            archive.add(path, arcname=name, recursive=False)
-            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return hashes
+    return pack_bundle(root, destination, runtime_files(root) + ["eval/harbor/driver.ts", "eval/harbor/script.ts"])
 
 
 class SmokeOptions(InstalledAgentOptions):
