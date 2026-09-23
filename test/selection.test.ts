@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { buildView, readHistory, SELECTION_ENTRY } from '../src/history.ts';
+import { commitSelection, buildView, readHistory, SELECTION_ENTRY } from '../src/history.ts';
 import { prepareJevRequest } from '../src/judge-state.ts';
 import { providerText } from '../src/provider-view.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig } from '../src/selection.ts';
@@ -14,7 +14,7 @@ const model: Model<'openai-completions'> = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
 function record(manager: SessionManager, retiredIds: string[], policy = 'jev-select-v1') {
-  return manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy, sourceLeafId: manager.getLeafId(), retiredIds });
+  return commitSelection(manager, retiredIds, policy);
 }
 function fixture() {
   const manager = SessionManager.inMemory();
@@ -52,8 +52,9 @@ test('restoration judges and renders historical original text, not stubs; unchan
   assert.equal(selected.budget.fits, true);
   assert.deepEqual({ history: f.history, payload: f.payload }, before);
   record(f.manager, selected.retiredIds);
-  const next = readHistory(f.manager.getBranch(), f.original);
-  const rendered = buildView(f.original, next, next.retiredIds).filter((message) => message.role === 'toolResult').map(providerText);
+  const native = f.manager.buildSessionProjection().messages;
+  readHistory(f.manager.getBranch(), native);
+  const rendered = native.filter((message) => message.role === 'toolResult').map(providerText);
   assert.deepEqual((selected.payload as typeof f.payload).messages.map((message) => message.content), rendered);
 });
 

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { createContextExtension, STOP_ENTRY, USAGE_ENTRY, type UsageRecord } from '../src/extension.ts';
-import { SELECTION_ENTRY } from '../src/history.ts';
+import { SELECTION_ENTRY, readHistory } from '../src/history.ts';
 import { assistant, seedHistory } from './history-fixture.ts';
 import { createPiFixture, type FixtureRequest } from './pi-fixture.ts';
 
@@ -27,7 +27,7 @@ test('actual Pi requests use selected views while disk originals and unchanged p
     const file = manager.getSessionFile()!;
     const originalLines = (await readFile(file, 'utf8')).trim().split('\n');
     let select = true;
-    const { session, errors } = await fixture.session([createContextExtension({
+    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'scripted-v1', budget,
       select: () => { if (!select) return null; select = false; return [oldId]; },
     })], manager);
@@ -43,6 +43,13 @@ test('actual Pi requests use selected views while disk originals and unchanged p
     assert.equal(fixture.requests.length, 2);
     assert.deepEqual(fixture.requests[1]!.messages.slice(0, firstMessages.length), firstMessages);
     assert.equal(records(manager, SELECTION_ENTRY).length, 1);
+    assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 1);
+    const checkpoint = records(manager, SELECTION_ENTRY)[0]!;
+    assert.ok(checkpoint.type === 'custom');
+    assert.ok(!('retiredIds' in (checkpoint.data as object)));
+    const nativeResult = manager.buildSessionProjection().messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'old');
+    assert.ok(nativeResult?.role === 'toolResult');
+    assert.equal(nativeResult.content[0]?.type === 'text' && nativeResult.content[0].text, toolMessage(fixture.requests[1]!, 'old').content);
     const usage = records(manager, USAGE_ENTRY);
     assert.equal(usage.length, 2);
     assert.equal(usage[0]?.type, 'custom');
@@ -64,12 +71,12 @@ test('resume, tree navigation, and fork reuse only branch-owned decisions withou
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const { oldId } = seedHistory(manager);
     const forkPoint = manager.getLeafId()!;
-    const first = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget, select: () => [oldId] })], manager);
+    const first = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget, select: () => [oldId] })], manager);
     await first.session.prompt('Retire old evidence.');
     const hiddenLeaf = manager.getLeafId()!;
     first.session.dispose();
     const opened = SessionManager.open(manager.getSessionFile()!);
-    const resumed = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget })], opened);
+    const resumed = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget })], opened);
     await resumed.session.prompt('Resume without judging again.');
     assert.match(String(toolMessage(fixture.requests.at(-1)!, 'old').content), /retired observation/);
     assert.equal(records(opened, SELECTION_ENTRY).length, 1);
@@ -81,7 +88,7 @@ test('resume, tree navigation, and fork reuse only branch-owned decisions withou
 
     const forkFile = opened.createBranchedSession(hiddenLeaf);
     assert.ok(forkFile);
-    const fork = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget })], SessionManager.open(forkFile));
+    const fork = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget })], SessionManager.open(forkFile));
     await fork.session.prompt('Continue the fork.');
     assert.match(String(toolMessage(fixture.requests.at(-1)!, 'old').content), /retired observation/);
     assert.equal(records(fork.manager, SELECTION_ENTRY).length, 1);
@@ -95,7 +102,7 @@ test('scripted restoration reintroduces verbatim historical evidence without exe
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const { oldId } = seedHistory(manager);
     let selection = [oldId];
-    const { session, errors } = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget, select: () => selection })], manager);
+    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget, select: () => selection })], manager);
     const events: string[] = [];
     session.subscribe((event) => { events.push(event.type); });
     await session.prompt('Take a detour.');
@@ -110,6 +117,51 @@ test('scripted restoration reintroduces verbatim historical evidence without exe
   } finally { await fixture.close(); }
 });
 
+test('a factory cannot write through a different SDK manager', async () => {
+  const fixture = await createPiFixture();
+  try {
+    const wrong = SessionManager.inMemory();
+    seedHistory(wrong);
+    const before = structuredClone(wrong.getBranch());
+    const run = await fixture.session(() => [createContextExtension(wrong, { policy: 'scripted-v1', budget, select: () => [] })]);
+    await run.session.prompt('Do not write into another session.');
+    assert.equal(fixture.requests.length, 0);
+    assert.deepEqual(wrong.getBranch(), before);
+    assert.equal(records(run.manager, SELECTION_ENTRY).length, 0);
+    assert.deepEqual(run.errors, []);
+  } finally { await fixture.close(); }
+});
+
+test('native edit or checkpoint persistence failure stops dispatch and suppresses further factory writes', async () => {
+  const fixture = await createPiFixture();
+  try {
+    for (const failCheckpoint of [false, true]) {
+      const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
+      const { oldId } = seedHistory(manager);
+      const persist = manager._persist.bind(manager);
+      let failed = false;
+      const factoryWritesAfterFailure: string[] = [];
+      manager._persist = (entry) => {
+        if (failed && (entry.type === 'custom' || entry.type === 'context_edit')) factoryWritesAfterFailure.push(entry.type);
+        if (!failed && (failCheckpoint ? entry.type === 'custom' && entry.customType === SELECTION_ENTRY : entry.type === 'context_edit')) {
+          failed = true;
+          throw new Error('Injected session write failure');
+        }
+        persist(entry);
+      };
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget, select: () => [oldId] })], manager);
+      await run.session.prompt('Retire then fail persistence.');
+      assert.equal(failed, true);
+      await run.session.prompt('Poisoned writer must not retry.');
+      assert.equal(fixture.requests.length, 0);
+      assert.deepEqual(factoryWritesAfterFailure, []);
+      assert.deepEqual(run.errors, []);
+      const reopened = SessionManager.open(manager.getSessionFile()!);
+      assert.throws(() => readHistory(reopened.getBranch(), reopened.buildSessionProjection().messages), /complete ordered branch|Incomplete native selection edit group/);
+    }
+  } finally { await fixture.close(); }
+});
+
 test('real Pi tool-loop results are persisted before selection and the entire newest exchange stays visible', async () => {
   const fixture = await createPiFixture();
   try {
@@ -120,7 +172,7 @@ test('real Pi tool-loop results are persisted before selection and the entire ne
       { id: 'read_b', name: 'read', arguments: { path: 'b.txt' } },
     ]);
     const observed: string[][] = [];
-    const { session, manager, errors } = await fixture.session([createContextExtension({
+    const { session, manager, errors } = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'scripted-v1', budget,
       select: (history) => {
         observed.push(history.evidence.map((item) => `${item.result.toolCallId}:${item.protectedReason}`));
@@ -143,12 +195,13 @@ test('final-payload budget stop sends no HTTP request and does not commit a prop
   try {
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const { oldId } = seedHistory(manager);
-    const { session, errors } = await fixture.session([createContextExtension({
+    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'scripted-v1', budget: { contextLimit: 100, marginTokens: 0 }, select: () => [oldId],
     })], manager);
     await session.prompt('Protected request cannot fit.');
     assert.equal(fixture.requests.length, 0);
     assert.equal(records(manager, SELECTION_ENTRY).length, 0);
+    assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 0);
     assert.equal(records(manager, STOP_ENTRY).length, 1);
     const usage = records(manager, USAGE_ENTRY)[0];
     assert.ok(usage?.type === 'custom');
@@ -168,8 +221,8 @@ test('a real interrupted tool batch can continue without modifying or synthesizi
       { id: 'slow', name: 'bash', arguments: { command: 'sleep 5' } },
       { id: 'never', name: 'bash', arguments: { command: 'echo second' } },
     ]);
-    const { session, manager, errors } = await fixture.session([
-      createContextExtension({ policy: 'scripted-v1', budget }),
+    const { session, manager, errors } = await fixture.session((manager) => [
+      createContextExtension(manager, { policy: 'scripted-v1', budget }),
     ], undefined, ['bash']);
     const started = Promise.withResolvers<void>();
     session.subscribe((event) => {
@@ -205,7 +258,7 @@ test('aborted assistant tool-call fragments are left to Pi provider normalizatio
       stopReason: 'aborted' as const,
     };
     const partialId = manager.appendMessage(partial);
-    const { session, errors } = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget })], manager);
+    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget })], manager);
     await session.prompt('Continue after a streamed call was interrupted.');
     assert.equal(fixture.requests.length, 1);
     assert.ok(!JSON.stringify(fixture.requests[0]!.messages).includes('partial'));
@@ -222,7 +275,7 @@ test('invalid selection and cancelled judging leave no partial selection', async
   try {
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const { recentId } = seedHistory(manager);
-    const invalid = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget, select: () => [recentId] })], manager);
+    const invalid = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget, select: () => [recentId] })], manager);
     await invalid.session.prompt('Invalid selection.');
     assert.equal(fixture.requests.length, 0);
     assert.equal(records(manager, SELECTION_ENTRY).length, 0);
@@ -230,7 +283,7 @@ test('invalid selection and cancelled judging leave no partial selection', async
 
     const waiting = Promise.withResolvers<void>();
     const release = Promise.withResolvers<string[]>();
-    const cancelled = await fixture.session([createContextExtension({
+    const cancelled = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'scripted-v1', budget,
       select: () => { waiting.resolve(); return release.promise; },
     })]);

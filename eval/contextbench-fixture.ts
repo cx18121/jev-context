@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai';
-import type { SessionEntry } from '@earendil-works/pi-coding-agent';
+import { buildSessionProjection, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import { buildView, readHistory, SELECTION_ENTRY } from '../src/history.ts';
 import { providerText } from '../src/provider-view.ts';
 import { analyzeCaptures, captureRequest, exportDiscovery, type RequestCapture, type SourceSnapshot } from './contextbench.ts';
@@ -34,13 +34,20 @@ export function contextFixture(source = fixtureSource) {
   }
   function select(retiredIds: string[]) {
     const leaf = branch.at(-1)?.id ?? null;
-    branch.push({ type: 'custom', id: `entry-${branch.length}`, parentId: leaf, timestamp: '2026-01-01T00:00:00Z', customType: SELECTION_ENTRY,
-      data: { version: 1, policy: 'scripted-v1', sourceLeafId: leaf, retiredIds } });
+    const messages = buildSessionProjection(branch).messages;
+    const history = readHistory(branch, messages);
+    const proposed = buildView(messages, history, retiredIds);
+    for (const [index, message] of proposed.entries()) {
+      if (message.role !== 'toolResult' || JSON.stringify(message) === JSON.stringify(messages[index])) continue;
+      const targetId = history.evidence.find((item) => item.result.toolCallId === message.toolCallId)!.id;
+      branch.push({ type: 'context_edit', id: `entry-${branch.length}`, parentId: branch.at(-1)!.id,
+        timestamp: '2026-01-01T00:00:00Z', targetId, replacement: { content: message.content } });
+    }
+    branch.push({ type: 'custom', id: `entry-${branch.length}`, parentId: branch.at(-1)?.id ?? null, timestamp: '2026-01-01T00:00:00Z', customType: SELECTION_ENTRY,
+      data: { version: 2, policy: 'scripted-v1', sourceLeafId: leaf } });
   }
   function payload() {
-    const messages = branch.flatMap((entry) => entry.type === 'message' ? [entry.message] : []);
-    const history = readHistory(branch, messages);
-    return { max_tokens: 1024, messages: buildView(messages, history, history.retiredIds)
+    return { max_tokens: 1024, messages: buildSessionProjection(branch).messages
       .filter((message) => message.role === 'toolResult')
       .map((message) => ({ role: 'tool', tool_call_id: message.toolCallId, content: providerText(message) })) };
   }

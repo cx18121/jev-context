@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { sanitizeSurrogates } from '@earendil-works/pi-ai/utils/sanitize-unicode';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { buildView, readHistory, retirementText, SELECTION_ENTRY } from '../src/history.ts';
+import { commitSelection, buildView, readHistory, retirementText, SELECTION_ENTRY } from '../src/history.ts';
 import { retireOldest } from '../src/retirement.ts';
 import { appendExchange, result } from './history-fixture.ts';
 
@@ -39,9 +39,7 @@ function prepared(manager: SessionManager) {
 }
 
 function record(manager: SessionManager, retiredIds: string[]) {
-  manager.appendCustomEntry(SELECTION_ENTRY, {
-    version: 1, policy: 'scripted-v1', sourceLeafId: manager.getLeafId(), retiredIds,
-  });
+  commitSelection(manager, retiredIds, 'scripted-v1');
 }
 
 test('a request at the exact budget preserves the payload and makes no selection', () => {

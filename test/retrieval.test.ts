@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { readHistory, SELECTION_ENTRY } from '../src/history.ts';
+import { commitSelection, readHistory } from '../src/history.ts';
 import { retrieveArchive } from '../src/retrieval.ts';
 import { appendExchange, assistant, result } from './history-fixture.ts';
 
@@ -10,7 +10,7 @@ function fixture(texts: string[], query: string) {
   const ids = texts.map((text, index) => appendExchange(manager, [result(`item-${index}`, text)])[0]!);
   appendExchange(manager, [result('latest', 'Current observation')]);
   manager.appendMessage({ role: 'user', content: query, timestamp: 4 });
-  manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'scripted-v1', sourceLeafId: manager.getLeafId(), retiredIds: ids });
+  commitSelection(manager, ids, 'scripted-v1');
   return { manager, ids, lookup(limit = 2) {
     const messages = manager.buildSessionContext().messages;
     const history = readHistory(manager.getBranch(), messages);
@@ -63,13 +63,12 @@ test('earlier user requirements survive detours; latest assistant action and new
 
 test('visible, restored and off-branch evidence cannot enter the archived pool', () => {
   const f = fixture(['invoice archive', 'invoice restored'], 'invoice');
-  const beforeSelection = f.manager.getLeafId()!;
-  f.manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'scripted-v1', sourceLeafId: beforeSelection, retiredIds: [f.ids[0]] });
+  commitSelection(f.manager, [f.ids[0]!], 'scripted-v1');
   assert.deepEqual(f.lookup().candidates.map((item) => item.evidence.id), [f.ids[0]]);
   const activeLeaf = f.manager.getLeafId()!;
   const [offBranch] = appendExchange(f.manager, [result('other-branch', 'invoice secret')]);
   appendExchange(f.manager, [result('other-latest', 'other')]);
-  f.manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'scripted-v1', sourceLeafId: f.manager.getLeafId(), retiredIds: [f.ids[0], offBranch] });
+  commitSelection(f.manager, [f.ids[0]!, offBranch!], 'scripted-v1');
   f.manager.branch(activeLeaf);
   assert.equal(f.lookup().poolSize, 1);
   assert.deepEqual(f.lookup().candidates.map((item) => item.evidence.id), [f.ids[0]]);

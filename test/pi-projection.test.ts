@@ -21,7 +21,7 @@ test('native SDK projections replace, restore, resume, and branch without changi
     const file = manager.getSessionFile()!;
     const originalLine = (await readFile(file, 'utf8')).split('\n').find((line) => line && JSON.parse(line).id === oldId);
     assert.ok(originalLine);
-    const run = await fixture.session([], manager);
+    const run = await fixture.session((manager) => [], manager);
     manager.appendContextEdit(oldId, { content: 'Native replacement' });
     run.session.refreshContext();
     const projected = manager.buildSessionProjection().entries.find((entry) => entry.sourceEntry.id === oldId);
@@ -34,7 +34,7 @@ test('native SDK projections replace, restore, resume, and branch without changi
     run.session.dispose();
 
     const reopened = SessionManager.open(file);
-    const resumed = await fixture.session([], reopened);
+    const resumed = await fixture.session((manager) => [], reopened);
     await resumed.session.prompt('Resume the native view.');
     assert.equal(wireText(), 'Native replacement');
     reopened.appendContextEdit(oldId, { content: original.message.content });
@@ -54,20 +54,20 @@ test('native SDK projections replace, restore, resume, and branch without changi
   } finally { await fixture.close(); }
 });
 
-test('selection stops explicitly on native edits without dispatch or committing a selection', async () => {
+test('selection stops explicitly on unsupported native edits without dispatch or committing a selection', async () => {
   const fixture = await createPiFixture();
   try {
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seedHistory(manager);
     const user = manager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'user')!;
     manager.appendContextEdit(user.id, { content: 'Changed user instructions' });
-    const run = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget, select: () => [] })], manager);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget, select: () => [] })], manager);
     await run.session.prompt('Do not mix projection owners.');
     assert.equal(fixture.requests.length, 0);
     const records = manager.getBranch().filter((entry) => entry.type === 'custom');
     assert.equal(records.filter((entry) => entry.customType === SELECTION_ENTRY).length, 0);
     const stopped = records.find((entry) => entry.customType === STOP_ENTRY);
-    assert.match((stopped?.data as { reason: string }).reason, /Native context edits are not supported/);
+    assert.match((stopped?.data as { reason: string }).reason, /Unsupported native context edit/);
     assert.deepEqual(run.errors, []);
   } finally { await fixture.close(); }
 });
@@ -79,9 +79,9 @@ test('system and tool changes stay on the wire without changing evidence protect
     seedHistory(manager);
     const observed: HistoryView[] = [];
     let prompt = 'First system instructions.';
-    const run = await fixture.session([
+    const run = await fixture.session((manager) => [
       (pi) => { pi.on('before_agent_start', () => ({ systemPrompt: prompt })); },
-      createContextExtension({ policy: 'scripted-v1', budget, select: (history) => { observed.push(history); return null; } }),
+      createContextExtension(manager, { policy: 'scripted-v1', budget, select: (history) => { observed.push(history); return null; } }),
     ], manager, ['read', 'bash']);
     await run.session.prompt('Continue.');
     prompt = 'Second system instructions.';

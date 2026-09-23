@@ -5,7 +5,7 @@ import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { measureRequest } from '../src/budget.ts';
 import { createContextExtension, JUDGE_RESULT_ENTRY, JUDGE_START_ENTRY, STOP_ENTRY } from '../src/extension.ts';
-import { SELECTION_ENTRY, type SelectionRecord } from '../src/history.ts';
+import { commitSelection, readHistory, SELECTION_ENTRY, type SelectionRecord } from '../src/history.ts';
 import { appendExchange, assistant, result } from './history-fixture.ts';
 import { createJevFixture, jevResponse } from './jev-fixture.ts';
 import { createPiFixture, type FixtureRequest } from './pi-fixture.ts';
@@ -20,7 +20,7 @@ function seed(manager: SessionManager, repeat = 100) {
   const [a] = appendExchange(manager, [result('a', 'Important API contract.\n'.repeat(repeat))]);
   const [b] = appendExchange(manager, [result('b', 'Obsolete environment output.\n'.repeat(120))]);
   appendExchange(manager, [result('latest', 'Environment ready.')]);
-  manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'scripted-v1', sourceLeafId: manager.getLeafId(), retiredIds: [a] });
+  commitSelection(manager, [a!], 'scripted-v1');
   return { a: a!, b: b! };
 }
 function tool(request: FixtureRequest, id: string) {
@@ -41,7 +41,7 @@ test('new user work restores original history before pressure, persists pure res
       body.answers[ids.a]!.noul = 0.8;
       return { body };
     });
-    const run = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
     const events: string[] = [];
     run.session.subscribe((event) => events.push(event.type));
     await run.session.prompt('Return to the API contract.');
@@ -51,7 +51,7 @@ test('new user work restores original history before pressure, persists pure res
     assert.match(tool(selected, 'a'), /restored historical observation/);
     assert.ok(tool(selected, 'a').endsWith('Important API contract.\n'.repeat(100)));
     assert.equal(tool(selected, 'latest'), 'Environment ready.');
-    assert.deepEqual(data<SelectionRecord>(manager, SELECTION_ENTRY).at(-1)!.retiredIds, []);
+    assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, []);
     const start = data<{ reconsideration: { restoredIds?: string[] } }>(manager, JUDGE_START_ENTRY)[0]!;
     assert.equal(start.reconsideration.restoredIds, undefined);
     assert.deepEqual(data(SessionManager.open(manager.getSessionFile()!), JUDGE_START_ENTRY), data(manager, JUDGE_START_ENTRY));
@@ -59,7 +59,7 @@ test('new user work restores original history before pressure, persists pure res
     assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'message').slice(0, originals.length), originals);
     assert.ok(!JSON.stringify(manager.getBranch()).includes(judge.config.apiKey));
     run.session.dispose();
-    const resumed = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], SessionManager.open(manager.getSessionFile()!));
+    const resumed = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], SessionManager.open(manager.getSessionFile()!));
     await resumed.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1); // No archived evidence remains.
     assert.deepEqual(fixture.requests[1]!.messages.slice(0, selected.messages.length), selected.messages);
@@ -73,15 +73,15 @@ test('a no-op checkpoint suppresses duplicate judging on an extracted resume wit
   try {
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const ids = seed(manager);
-    const factory = () => createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection });
-    const run = await fixture.session([factory()], manager);
+    const factory = (manager: SessionManager) => createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection });
+    const run = await fixture.session((manager) => [factory(manager)], manager);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
-    assert.deepEqual(data<SelectionRecord>(manager, SELECTION_ENTRY).at(-1)!.retiredIds, [ids.a]);
+    assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.a]);
     const checkpoint = manager.getBranch().findLast((entry) => entry.type === 'custom' && entry.customType === SELECTION_ENTRY)!;
     run.session.dispose();
     const forkFile = manager.createBranchedSession(checkpoint.id)!;
-    const resumed = await fixture.session([factory()], SessionManager.open(forkFile));
+    const resumed = await fixture.session((manager) => [factory(manager)], SessionManager.open(forkFile));
     await resumed.session.agent.continue();
     assert.equal(judge.requests.length, 1);
     assert.equal(fixture.requests.length, 2);
@@ -107,7 +107,7 @@ test('a completed real tool exchange creates another restoration opportunity whi
       return { body };
     });
     fixture.respondWithTools([{ id: 'fresh', name: 'read', arguments: { path: 'fresh.txt' } }]);
-    const run = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager, ['read']);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager, ['read']);
     await run.session.prompt('Read fresh.txt, then finish the API change.');
     assert.equal(judge.requests.length, 2);
     assert.equal(fixture.requests.length, 2);
@@ -128,7 +128,7 @@ test('a same-size swap is committed, while a selected restoration that cannot fi
   try {
     const controlManager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seed(controlManager);
-    const control = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget: roomy })], controlManager);
+    const control = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget: roomy })], controlManager);
     await control.session.prompt('Continue.');
     const measured = measureRequest(fixture.requests[0]!, fixture.model, roomy);
     const budget = { ...roomy, contextLimit: measured.inputEstimate + measured.outputReserve + measured.marginTokens };
@@ -141,18 +141,18 @@ test('a same-size swap is committed, while a selected restoration that cannot fi
         body.answers[ids.b]!.noul = canRetire ? 0.1 : judge.config.retireBelow;
         return { body };
       });
-      const run = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget, jev: judge.config, selection })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget, jev: judge.config, selection })], manager);
       await run.session.prompt('Continue.');
       const records = data<SelectionRecord>(manager, SELECTION_ENTRY);
       if (canRetire) {
         assert.equal(records.length, 2);
-        assert.deepEqual(records[1]!.retiredIds, [ids.b]);
+        assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.b]);
         assert.match(tool(fixture.requests.at(-1)!, 'a'), /restored historical observation/);
         assert.match(tool(fixture.requests.at(-1)!, 'b'), /retired observation/);
         assert.equal(measureRequest(fixture.requests.at(-1)!, fixture.model, budget).fits, true);
       } else {
         assert.equal(records.length, 1);
-        assert.deepEqual(records[0]!.retiredIds, [ids.a]);
+        assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.a]);
         const stopped = data<{ kind: string; budget: { fits: boolean }; reconsideration: { restoredIds: string[]; proposedRetiredIds: string[] } }>(manager, STOP_ENTRY)[0]!;
         assert.equal(stopped.kind, 'budget');
         assert.equal(stopped.budget.fits, false);
@@ -175,7 +175,7 @@ test('oversized archived evidence and failed judges explicitly stop fitting requ
       const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
       seed(manager, oversized ? 2000 : 100);
       judge.respond(() => ({ status: 529, body: { error: 'Unavailable' } }));
-      const run = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
       await run.session.prompt('Continue.');
       assert.equal(data(manager, SELECTION_ENTRY).length, 1);
       assert.equal(data<{ kind: string }>(manager, STOP_ENTRY)[0]!.kind, 'judge');
@@ -197,14 +197,14 @@ test('a zero-match event is checkpointed without a judge call or silent archive 
     const old = manager.appendMessage(result('old', 'Grace interval'));
     manager.appendMessage(assistant([{ type: 'toolCall', id: 'new', name: 'read', arguments: { path: 'workspace' } }]));
     manager.appendMessage(result('new', 'Ready'));
-    manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'scripted-v1', sourceLeafId: manager.getLeafId(), retiredIds: [old] });
-    const run = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+    commitSelection(manager, [old], 'scripted-v1');
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 0);
     assert.equal(fixture.requests.length, 1);
     const records = data<SelectionRecord & { reconsideration: { retrieval: { matchedCount: number; candidateIds: string[] } } }>(manager, SELECTION_ENTRY);
     assert.equal(records.length, 2);
-    assert.deepEqual(records[1]!.retiredIds, [old]);
+    assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [old]);
     assert.equal(records[1]!.reconsideration.retrieval.matchedCount, 0);
     assert.deepEqual(records[1]!.reconsideration.retrieval.candidateIds, []);
     assert.deepEqual(run.errors, []);
@@ -222,7 +222,7 @@ test('cancellation and late results after a branch switch cannot partially resto
       const previous = manager.getLeafId()!;
       const entered = Promise.withResolvers<void>();
       judge.respond(async (request) => { entered.resolve(); await release.promise; return { body: jevResponse(request, 0.9) }; });
-      const run = await fixture.session([createContextExtension({ policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
       const pending = run.session.prompt('Return to the API.');
       await entered.promise;
       if (moveBranch) {
@@ -233,7 +233,8 @@ test('cancellation and late results after a branch switch cannot partially resto
         release.resolve();
       }
       await pending;
-      assert.deepEqual(data<SelectionRecord>(manager, SELECTION_ENTRY).map((item) => item.retiredIds), [[ids.a]]);
+      assert.equal(data(manager, SELECTION_ENTRY).length, 1);
+      assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.a]);
       assert.equal(data(manager, JUDGE_START_ENTRY).length, moveBranch ? 0 : 1);
       if (!moveBranch) assert.equal(data<{ kind: string }>(manager, STOP_ENTRY)[0]!.kind, 'cancelled');
       assert.deepEqual(run.errors, []);

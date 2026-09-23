@@ -18,8 +18,8 @@ Tests start a local OpenAI-compatible HTTP fixture on `127.0.0.1` and run the ac
 
 ## What exists
 
-- `src/history.ts` resolves tool observations to active-branch session entries, validates selections, and constructs deterministic views.
-- `src/extension.ts` connects the view to Pi's context and provider hooks. It records selections, explicit stops, and Pi-normalized usage as custom session entries.
+- `src/history.ts` resolves original observations and validates Pi's branch-local projection. It renders transient proposals and commits accepted changes as native context edits.
+- `src/extension.ts` connects selection to Pi's context and provider hooks. Custom entries record selection checkpoints, explicit stops, and Pi-normalized usage, not a second selected-state store.
 - `src/budget.ts` checks the outgoing text request against a conservative size estimate and its explicit output allowance.
 - `src/retirement.ts` prepares the shared candidate pool and applies a retirement ordering to the outgoing payload.
 - `src/judge-state.ts` assembles the task state and per-candidate relevance questions without truncating them.
@@ -32,7 +32,8 @@ Tests start a local OpenAI-compatible HTTP fixture on `127.0.0.1` and run the ac
 Load the factory explicitly in an isolated Pi SDK setup, with native automatic compaction disabled.
 
 ```ts
-createContextExtension({
+// Pass the same SessionManager used by createAgentSession.
+createContextExtension(sessionManager, {
   policy: 'oldest-first-v1',
   budget: { contextLimit: 32768, marginTokens: 1024 },
 });
@@ -40,7 +41,7 @@ createContextExtension({
 
 These budget values are examples, not calibrated defaults. The policy preserves the recorded view until the full serialized request exceeds the budget. It then retires visible, eligible observations in capture order until the request fits. It skips any observation whose stub would not shrink the request. If retirement cannot make the request fit, dispatch stops and no proposed selection is recorded. This policy does not restore evidence automatically.
 
-For integration tests, `policy: 'scripted-v1'` accepts an optional `select` callback. Omitting it or returning `null` reuses the recorded view. Each extension instance uses one policy. All policies honor existing branch-owned selections on resume, regardless of which policy recorded them.
+For integration tests, `policy: 'scripted-v1'` accepts an optional `select` callback. Omitting it or returning `null` reuses the recorded view. Each extension instance uses one policy. All policies honor existing branch-owned native selections on resume, regardless of which policy recorded them. A factory is bound to one SDK SessionManager. Using it with another manager stops dispatch.
 
 ## Jev retirement
 
@@ -66,11 +67,11 @@ When retired evidence exists, a new user message or completed tool exchange give
 
 The batch contains the bounded lexical archive shortlist and all eligible, shrinkable visible observations. Code restores every archived candidate scoring at or above `restoreAtOrAbove`, at its original position with a historical label. It then retires visible candidates scoring strictly below `retireBelow`, lowest score first, only as needed to make the complete request fit. Newly restored evidence cannot be retired again within that decision. A later event can judge it again. Intermediate scores preserve the existing visibility state. The threshold gap is an experimental policy, not a guarantee against oscillation across changing judgments.
 
-The complete proposal is validated before its selected set and event checkpoint are committed. This includes pure restores, same-size swaps, and successful no-op reconsiderations. A zero-match lookup on a fitting request records a checkpoint without calling Jev. With no fresh event, only context pressure can trigger retirement. With no archived evidence, behavior is pressure-triggered retirement. Existing `oldest-first-v1` and `jev-v1` remain separate comparison policies.
+The complete proposal is validated against the final serialized budget before changed observations are committed as native context edits, followed immediately by the event checkpoint. This includes pure restores, same-size swaps, and successful no-op reconsiderations. A zero-match lookup on a fitting request records a checkpoint without calling Jev. With no fresh event, only context pressure can trigger retirement. With no archived evidence, behavior is pressure-triggered retirement. Existing `oldest-first-v1` and `jev-v1` remain separate comparison policies.
 
 **Failure behavior.** If selected restorations cannot fit after the permitted retirements, dispatch stops and the old selection stays recorded. A stop record includes the proposed restored and retired IDs and complete budget measurement. Oversized judge inputs, timeouts, and invalid responses also stop explicitly, even when the previous view would have fit. There is no skip-and-continue fallback and no automatic retry. Failed attempts do not consume the event checkpoint. Manually retrying the same state can repeat the failure and incur another judge charge. This strict experimental behavior is not a daily-use readiness claim.
 
-Judge-start, selection, and stop records carry applicable reconsideration metadata, including event entry IDs, retrieval version, pool/match counts, shortlist IDs and limit, and restoration cutoff. The ordinary selection record still owns the full retired set. Diagnostic metadata does not introduce another state store. Candidate count does not bound judge bytes; the existing full-batch byte caps still apply. Missing archive candidates remain a retrieval limitation, not evidence that no useful history exists.
+Judge-start, selection, and stop records carry applicable reconsideration metadata, including event entry IDs, retrieval version, pool/match counts, shortlist IDs and limit, and restoration cutoff. Pi's native projection owns visibility. The version 2 selection checkpoint contains the policy and pre-edit leaf, not the retired set. Diagnostic metadata does not introduce another state store. Candidate count does not bound judge bytes; the existing full-batch byte caps still apply. Missing archive candidates remain a retrieval limitation, not evidence that no useful history exists.
 
 Local SDK tests exercise user and tool-loop triggers, original-text restoration without tool execution, unchanged prefixes, extracted resume checkpoints, atomic swaps, insufficient space, zero matches, oversized inputs, judge failure, cancellation, and successful late responses after a branch move. They use scripted model and judge responses. They establish integration behavior, not real relevance quality, cache hits, task accuracy, or savings. Normal-stack compatibility and installation remain out of scope.
 
@@ -122,7 +123,8 @@ Tests demonstrate the following properties against Pi 0.87.1 and the local fixtu
 - Disabling native automatic compaction prevents summarization and retry after a simulated provider overflow.
 - Input, output, cache, and cost fields exposed by Pi are captured with the request's budget measurement.
 - System-prompt and active-tool changes reach the provider without changing evidence identity or protection.
-- Separate SDK-only tests verify native context replacement, restoration, resume, and branch navigation against actual loopback requests while preserving raw entries. The selection extension does not yet use native edits.
+- Accepted selections become native context edits. Actual wire content agrees with Pi's projection, including after restoration and resume. Checkpoints do not duplicate visibility state.
+- Incomplete edit groups and unsupported native edits stop explicitly. Injected edit/checkpoint write failures prevent dispatch and suppress further writes from that extension instance.
 
 These checks do not establish live cache hits, Jev selection quality, or monetary savings.
 
@@ -130,11 +132,11 @@ These checks do not establish live cache hits, Jev selection quality, or monetar
 
 **Protected content.** Only whole text tool results can be retired. The newest complete tool exchange, results from incomplete exchanges, non-text results, user messages, and assistant messages stay intact. Retired results keep their original call relationship, status, and details. Their text is replaced by a deterministic stub. Error and truncation status remain separate.
 
-**Selection records.** Version 1 records contain the policy identifier, source leaf, and full set of retired session-entry IDs. Restored evidence is identified from previous retirements on that branch. No separate database is used. Unsupported record versions and histories containing summaries are rejected rather than silently reinterpreted. Reused tool-call IDs across valid assistant turns are also rejected. Providers that reuse IDs need an expanded identity mapping before they are supported.
+**Selection state.** Pi's [append-only context edits](https://github.com/earendil-works/pi/blob/v0.87.1/packages/coding-agent/docs/session-format.md#contexteditentry) own the working view. Original tool results remain in raw history. Current visibility and prior retirement are derived from validated edits, never inferred from an original result's text. Version 2 custom checkpoints record only policy, pre-edit leaf, and optional diagnostics. Legacy version 1 retired-set records have no migration path and stop explicitly. Start a new experimental session instead. Summarized histories, arbitrary native edits, and reused tool-call IDs across valid assistant turns remain unsupported.
 
-**Native context edits.** Pi 0.87.1 adds [append-only context edits](https://github.com/earendil-works/pi/blob/v0.87.1/packages/coding-agent/docs/session-format.md#contexteditentry). This upgrade preserves our existing selection records and request-local view. The selection extension explicitly stops on a branch containing native edits rather than mixing two sources of context state. Adopting native projection is a separate ownership change. Its integration must preserve our final-payload budget check and cancellation behavior. The extension's native edit hooks run at lifecycle boundaries, not at that final request check.
+**Commit boundary.** The context hook reads Pi's projected view and applies only a new scripted proposal. Automatic selection runs at the provider-request hook, where the payload includes system text, tool schemas, and the output allowance. After the complete proposal fits, the bound SDK manager synchronously appends changed tool-result edits followed by a checkpoint anchored to the pre-edit leaf. Unchanged selections need no edits. Successful no-op reconsiderations still record an event checkpoint. No edit is written for a budget-rejected or cancelled proposal. A completed group does not imply provider acceptance or task success.
 
-**Commit boundary.** The context hook reconstructs the recorded view and applies any scripted selection. Automatic retirement runs at the provider-request hook, where the payload includes system text, tool schemas, and the output allowance. Both paths validate selections and record them only after the final payload passes the budget check, before dispatch. A recorded selection does not imply the provider accepted the request or the task succeeded.
+**Persistence limits.** Edits and their completion checkpoint are sequential writes, not a disk transaction. The reader rejects incomplete or interleaved groups, including a branch taken in the middle of a group. Branch at a completed checkpoint or a message instead. An edit or checkpoint write failure stops dispatch and poisons that extension instance so it writes no further edits, stop records, or usage records. Pi may still append its own lifecycle messages. Reopening an intact branch is required before continuing. These checks detect incomplete groups and broken ancestry, not every form of file corruption. There is no rollback or automatic repair.
 
 **Provider mapping.** Automatic retirement supports text-only OpenAI Completions payloads with unchanged, unique tool-call IDs. Before replacing text, it verifies that the outgoing result matches the selected view, including historical labels and Pi's Unicode sanitation. If Pi has normalized a candidate's ID, or the result mapping is missing, ambiguous, or changed, selection stops rather than guessing. Other extension stacks and provider APIs remain unverified.
 

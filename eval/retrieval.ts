@@ -1,8 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import { readHistory, SELECTION_ENTRY } from '../src/history.ts';
+import { buildSessionProjection, type SessionEntry } from '@earendil-works/pi-coding-agent';
+import { readHistory, retirementText, SELECTION_ENTRY } from '../src/history.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from '../src/retrieval.ts';
 import { retrievalScenarios, type RetrievalScenario } from './retrieval-fixtures.ts';
 
@@ -34,10 +34,15 @@ export function prepareRetrievalFixture(scenario: RetrievalScenario) {
   exchange(scenario.latestPath, 'Current observation.');
   assistant([{ type: 'text', text: scenario.action }], 'stop');
   const sourceLeafId = branch.at(-1)!.id;
-  branch.push({ type: 'custom', id: (branch.length + 1).toString(16).padStart(8, '0'), parentId: sourceLeafId,
+  const original = readHistory(branch, messages);
+  for (const item of original.evidence.filter((item) => labels.has(item.id))) {
+    branch.push({ type: 'context_edit', id: (branch.length + 1).toString(16).padStart(8, '0'), parentId: branch.at(-1)!.id,
+      timestamp: '2026-01-01T00:00:00.000Z', targetId: item.id, replacement: { content: [{ type: 'text', text: retirementText(item) }] } });
+  }
+  branch.push({ type: 'custom', id: (branch.length + 1).toString(16).padStart(8, '0'), parentId: branch.at(-1)!.id,
     timestamp: '2026-01-01T00:00:00.000Z', customType: SELECTION_ENTRY,
-    data: { version: 1, policy: 'scripted-v1', sourceLeafId, retiredIds: [...labels.keys()] } });
-  return { history: readHistory(branch, messages), messages, labels };
+    data: { version: 2, policy: 'scripted-v1', sourceLeafId } });
+  return { history: readHistory(branch, buildSessionProjection(branch).messages), messages, labels };
 }
 
 export function evaluateRetrieval(scenario: RetrievalScenario) {

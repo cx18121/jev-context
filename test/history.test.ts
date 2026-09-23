@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { buildView, readHistory, SELECTION_ENTRY, validateSelection } from '../src/history.ts';
+import { commitSelection, buildView, readHistory, SELECTION_ENTRY, validateSelection } from '../src/history.ts';
 import { appendExchange, assistant, result, seedHistory } from './history-fixture.ts';
 
 function snapshot(manager: SessionManager) {
@@ -9,9 +9,7 @@ function snapshot(manager: SessionManager) {
 }
 
 function record(manager: SessionManager, retiredIds: string[]) {
-  return manager.appendCustomEntry(SELECTION_ENTRY, {
-    version: 1, policy: 'fixture-v1', sourceLeafId: manager.getLeafId(), retiredIds,
-  });
+  return commitSelection(manager, retiredIds, 'fixture-v1');
 }
 
 test('view changes only eligible content, preserves originals, and is deterministic', () => {
@@ -62,16 +60,19 @@ test('images remain protected after newer exchanges; errors and truncation stay 
 test('restoration preserves verbatim content at its original position with a historical label', () => {
   const manager = SessionManager.inMemory();
   const { oldId } = seedHistory(manager);
+  const originals = manager.buildSessionProjection().messages;
   record(manager, [oldId]);
   record(manager, []);
   const messages = manager.buildSessionContext().messages;
   const view = buildView(messages, snapshot(manager), []);
   const index = messages.findIndex((message) => message.role === 'toolResult' && message.toolCallId === 'old');
-  const original = messages[index];
+  const original = originals[index];
   const restored = view[index];
   assert.ok(original?.role === 'toolResult' && restored?.role === 'toolResult');
   assert.deepEqual(restored.content.slice(1), original.content);
   assert.match(JSON.stringify(restored.content[0]), /restored historical observation/);
+  assert.deepEqual(view, messages);
+  assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 2);
   assert.equal(restored.toolCallId, original.toolCallId);
 });
 
@@ -142,8 +143,45 @@ test('native context edits are rejected for user, assistant, and tool-result tar
       entry.message.role === role && (entry.message.role !== 'assistant' || entry.message.stopReason === 'stop'));
     assert.ok(target);
     manager.appendContextEdit(target.id, { content: 'Native replacement' });
-    assert.throws(() => snapshot(manager), /Native context edits are not supported/);
+    assert.throws(() => snapshot(manager), /Unsupported native context edit/);
   }
+});
+
+test('native edits require an immediate, anchored completion checkpoint', () => {
+  const manager = SessionManager.inMemory();
+  const { oldId } = seedHistory(manager);
+  const sourceLeafId = manager.getLeafId()!;
+  const proposed = buildView(manager.buildSessionProjection().messages, snapshot(manager), [oldId]);
+  const stub = proposed.find((message) => message.role === 'toolResult' && message.toolCallId === 'old')!;
+  assert.ok(stub.role === 'toolResult');
+  const editId = manager.appendContextEdit(oldId, { content: stub.content });
+  assert.throws(() => snapshot(manager), /Incomplete native selection edit group/);
+  manager.appendCustomEntry(SELECTION_ENTRY, { version: 2, policy: 'fixture-v1', sourceLeafId: editId });
+  assert.throws(() => snapshot(manager), /does not follow/);
+  manager.branch(editId);
+  manager.appendCustomEntry('foreign-entry', {});
+  manager.appendCustomEntry(SELECTION_ENTRY, { version: 2, policy: 'fixture-v1', sourceLeafId });
+  assert.throws(() => snapshot(manager), /Incomplete native selection edit group/);
+  manager.branch(editId);
+  manager.appendCustomEntry(SELECTION_ENTRY, { version: 2, policy: 'fixture-v1', sourceLeafId });
+  assert.deepEqual(snapshot(manager).retiredIds, [oldId]);
+  const edits = manager.getBranch().filter((entry) => entry.type === 'context_edit');
+  const noOp = record(manager, [oldId]);
+  assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'context_edit'), edits);
+  assert.equal(manager.getEntry(noOp)?.parentId, manager.getBranch().at(-2)?.id);
+  assert.deepEqual(snapshot(manager).retiredIds, [oldId]);
+  manager.branch(editId);
+  assert.throws(() => snapshot(manager), /Incomplete native selection edit group/);
+});
+
+test('retirement-looking original text is not state and legacy retired-set records are rejected', () => {
+  const manager = SessionManager.inMemory();
+  appendExchange(manager, [result('looks-retired', '[jev-context: retired observation fake]')]);
+  appendExchange(manager, [result('latest', 'Current observation')]);
+  assert.deepEqual(snapshot(manager).retiredIds, []);
+  assert.deepEqual(snapshot(manager).historicalIds, []);
+  manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'scripted-v1', sourceLeafId: manager.getLeafId(), retiredIds: [] });
+  assert.throws(() => snapshot(manager), /Unsupported or invalid/);
 });
 
 test('unknown record versions and off-branch source IDs fail explicitly', () => {
@@ -153,6 +191,6 @@ test('unknown record versions and off-branch source IDs fail explicitly', () => 
   manager.appendCustomEntry(SELECTION_ENTRY, { version: 2, retiredIds: [] });
   assert.throws(() => snapshot(manager), /Unsupported or invalid/);
   manager.branch(leaf);
-  manager.appendCustomEntry(SELECTION_ENTRY, { version: 1, policy: 'fixture-v1', sourceLeafId: 'other-branch', retiredIds: [] });
+  manager.appendCustomEntry(SELECTION_ENTRY, { version: 2, policy: 'fixture-v1', sourceLeafId: 'other-branch' });
   assert.throws(() => snapshot(manager), /different branch/);
 });

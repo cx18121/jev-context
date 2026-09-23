@@ -84,7 +84,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
     respondWithTools(calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>) {
       toolResponses.push(calls);
     },
-    async session(factories: ExtensionFactory[] = [], manager = SessionManager.create(directory, join(directory, 'sessions')), tools: string[] = []) {
+    async session(factories: (manager: SessionManager) => ExtensionFactory[] = () => [], manager = SessionManager.create(directory, join(directory, 'sessions')), tools: string[] = []) {
       const settings = SettingsManager.inMemory({
         cacheWarming: 'off',
         compaction: { enabled: false },
@@ -93,7 +93,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
       const loader = new DefaultResourceLoader({
         cwd: directory, agentDir: join(directory, 'agent'), settingsManager: settings,
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-        extensionFactories: factories,
+        extensionFactories: factories(manager),
         systemPromptOverride: () => 'Local integration fixture.',
         appendSystemPromptOverride: () => [],
       });

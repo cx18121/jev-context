@@ -5,7 +5,7 @@ import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { measureRequest } from '../src/budget.ts';
 import { createContextExtension, STOP_ENTRY, USAGE_ENTRY, type UsageRecord } from '../src/extension.ts';
-import { SELECTION_ENTRY, type SelectionRecord } from '../src/history.ts';
+import { SELECTION_ENTRY, readHistory, type SelectionRecord } from '../src/history.ts';
 import { seedHistory } from './history-fixture.ts';
 import { createPiFixture, type FixtureRequest } from './pi-fixture.ts';
 
@@ -28,7 +28,7 @@ test('pressure retirement changes only selected wire text, persists before dispa
   try {
     const controlManager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seedHistory(controlManager);
-    const control = await fixture.session([createContextExtension({ policy: 'oldest-first-v1', budget: roomy })], controlManager, ['read']);
+    const control = await fixture.session((manager) => [createContextExtension(manager, { policy: 'oldest-first-v1', budget: roomy })], controlManager, ['read']);
     await control.session.prompt('Continue.');
     assert.equal(fixture.requests.length, 1);
     assert.equal(records(controlManager, SELECTION_ENTRY).length, 0);
@@ -41,8 +41,8 @@ test('pressure retirement changes only selected wire text, persists before dispa
     const file = manager.getSessionFile()!;
     const originalLines = (await readFile(file, 'utf8')).trim().split('\n');
     let recordedAtDispatch = false;
-    const selected = await fixture.session([
-      createContextExtension({ policy: 'oldest-first-v1', budget }),
+    const selected = await fixture.session((manager) => [
+      createContextExtension(manager, { policy: 'oldest-first-v1', budget }),
       (pi) => { pi.on('before_provider_request', () => {
         recordedAtDispatch = records(manager, SELECTION_ENTRY).length === 1;
       }); },
@@ -58,7 +58,7 @@ test('pressure retirement changes only selected wire text, persists before dispa
     assert.equal(measureRequest(request, fixture.model, budget).fits, true);
     const selection = records(manager, SELECTION_ENTRY)[0];
     assert.ok(selection?.type === 'custom');
-    assert.deepEqual((selection.data as SelectionRecord).retiredIds, [oldId]);
+    assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [oldId]);
     assert.equal((selection.data as SelectionRecord).policy, 'oldest-first-v1');
     const lines = (await readFile(file, 'utf8')).trim().split('\n');
     for (const line of originalLines) assert.ok(lines.includes(line));
@@ -68,7 +68,7 @@ test('pressure retirement changes only selected wire text, persists before dispa
     selected.session.dispose();
 
     const reopened = SessionManager.open(file);
-    const resumed = await fixture.session([createContextExtension({ policy: 'oldest-first-v1', budget })], reopened, ['read']);
+    const resumed = await fixture.session((manager) => [createContextExtension(manager, { policy: 'oldest-first-v1', budget })], reopened, ['read']);
     await resumed.session.prompt('Continue again.');
     assert.equal(fixture.requests.length, 3);
     assert.deepEqual(fixture.requests[2]!.messages.slice(0, request.messages.length), request.messages);
@@ -87,13 +87,13 @@ test('pressure from actual tool execution retires only previously observed excha
       fixture.respondWithTools([{ id: 'b', name: 'read', arguments: { path: 'b.txt' } }]);
     }
     queueCalls();
-    const control = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget: roomy })], undefined, ['read']);
+    const control = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget: roomy })], undefined, ['read']);
     await control.session.prompt('Read a.txt then b.txt.');
     assert.equal(fixture.requests.length, 3);
     const budget = { ...roomy, contextLimit: required(fixture, fixture.requests[2]!) - 1 };
     assert.ok(required(fixture, fixture.requests[1]!) < budget.contextLimit);
     queueCalls();
-    const selected = await fixture.session([createContextExtension({ policy: 'oldest-first-v1', budget })], undefined, ['read']);
+    const selected = await fixture.session((manager) => [createContextExtension(manager, { policy: 'oldest-first-v1', budget })], undefined, ['read']);
     await selected.session.prompt('Read a.txt then b.txt.');
     assert.equal(fixture.requests.length, 6);
     assert.deepEqual(fixture.requests[3], fixture.requests[0]);
@@ -113,7 +113,7 @@ test('cannot-fit retirement aborts without dispatch or any partial selection', a
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seedHistory(manager);
     const originals = structuredClone(manager.getBranch().filter((entry) => entry.type === 'message'));
-    const { session, errors } = await fixture.session([createContextExtension({
+    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'oldest-first-v1', budget: { contextLimit: 100, marginTokens: 0 },
     })], manager);
     await session.prompt('Protected material cannot fit.');
@@ -139,13 +139,13 @@ test('a provider mapping mismatch stops explicitly instead of being swallowed an
   try {
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seedHistory(manager);
-    const { session, errors } = await fixture.session([
+    const { session, errors } = await fixture.session((manager) => [
       (pi) => { pi.on('before_provider_request', (event) => {
         const payload = structuredClone(event.payload) as FixtureRequest;
         tool(payload, 'old').tool_call_id = 'rewritten-id';
         return payload;
       }); },
-      createContextExtension({ policy: 'oldest-first-v1', budget: { contextLimit: 100, marginTokens: 0 } }),
+      createContextExtension(manager, { policy: 'oldest-first-v1', budget: { contextLimit: 100, marginTokens: 0 } }),
     ], manager);
     await session.prompt('Reject the mismatched mapping.');
     assert.equal(fixture.requests.length, 0);

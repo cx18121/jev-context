@@ -106,7 +106,7 @@ test('a budget stop is not a captured request or a scored zero', async () => {
   let received = 0;
   const fixture = await createPiFixture(() => { received++; });
   try {
-    const { session, manager, errors } = await fixture.session([createContextExtension({
+    const { session, manager, errors } = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'scripted-v1', budget: { contextLimit: 1, marginTokens: 0 },
     })]);
     await session.prompt('Cannot dispatch within this budget.');
@@ -136,7 +136,7 @@ test('real SDK transport captures reads, retirement and restoration without anot
     for (const [file, text] of Object.entries(source.files)) await writeFile(join(root, file), text);
     manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     let selection: string[] | null = null;
-    const { session, errors } = await fixture.session([createContextExtension({
+    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'scripted-v1', budget: { contextLimit: 32768, marginTokens: 1024 }, select: () => selection,
     })], manager, ['read']);
     const executed: string[] = [];

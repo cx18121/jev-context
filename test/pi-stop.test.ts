@@ -7,7 +7,7 @@ test('context abort prevents HTTP dispatch and leaves the session usable', async
   try {
     let shouldStop = true;
     let intercepted = 0;
-    const { session, errors } = await fixture.session([(pi) => {
+    const { session, errors } = await fixture.session((manager) => [(pi) => {
       pi.on('context', (_event, ctx) => {
         intercepted++;
         if (shouldStop) ctx.abort();

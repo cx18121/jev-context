@@ -4,7 +4,7 @@ import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { measureRequest } from '../src/budget.ts';
 import { createContextExtension, JUDGE_RESULT_ENTRY, JUDGE_START_ENTRY, STOP_ENTRY, USAGE_ENTRY, type UsageRecord } from '../src/extension.ts';
-import { SELECTION_ENTRY, type SelectionRecord } from '../src/history.ts';
+import { SELECTION_ENTRY, readHistory } from '../src/history.ts';
 import type { JevResult } from '../src/jev.ts';
 import { appendExchange, result } from './history-fixture.ts';
 import { createJevFixture, jevResponse } from './jev-fixture.ts';
@@ -33,7 +33,7 @@ test('Jev retires lower relevance rather than older evidence, and resume reuses 
   try {
     const controlManager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seed(controlManager);
-    const control = await fixture.session([createContextExtension({ policy: 'scripted-v1', budget: roomy })], controlManager);
+    const control = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget: roomy })], controlManager);
     await control.session.prompt('Continue.');
     const full = fixture.requests[0]!;
     const measured = measureRequest(full, fixture.model, roomy);
@@ -46,7 +46,7 @@ test('Jev retires lower relevance rather than older evidence, and resume reuses 
       response.answers[ids.a]!.noul = 0.9;
       return { body: response };
     });
-    const selected = await fixture.session([createContextExtension({ policy: 'jev-v1', budget, jev: judge.config })], manager);
+    const selected = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget, jev: judge.config })], manager);
     await selected.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
     assert.deepEqual(Object.keys(judge.requests[0]!.questions), [ids.a, ids.b]);
@@ -56,7 +56,7 @@ test('Jev retires lower relevance rather than older evidence, and resume reuses 
     assert.match(String(tool(request, 'b').content), /retired observation/);
     assert.equal(tool(request, 'latest').content, tool(full, 'latest').content);
     assert.equal(measureRequest(request, fixture.model, budget).fits, true);
-    assert.deepEqual(data<SelectionRecord>(manager, SELECTION_ENTRY)[0]!.retiredIds, [ids.b]);
+    assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.b]);
     assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'message').slice(0, originals.length), originals);
     const start = data<{ requestId: string; requestHash: string }>(manager, JUDGE_START_ENTRY)[0]!;
     const judged = data<JevResult & { requestId: string }>(manager, JUDGE_RESULT_ENTRY)[0]!;
@@ -68,7 +68,7 @@ test('Jev retires lower relevance rather than older evidence, and resume reuses 
     assert.ok(!JSON.stringify(manager.getBranch()).includes(judge.config.apiKey));
     selected.session.dispose();
     const reopened = SessionManager.open(manager.getSessionFile()!);
-    const resumed = await fixture.session([createContextExtension({ policy: 'jev-v1', budget, jev: judge.config })], reopened);
+    const resumed = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget, jev: judge.config })], reopened);
     await resumed.session.prompt('Continue again.');
     assert.equal(judge.requests.length, 1);
     assert.equal(fixture.requests.length, 3);
@@ -84,7 +84,7 @@ test('scores at the cutoff cannot trigger forced retirement; judge cost survives
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seed(manager);
     judge.respond((request) => ({ body: jevResponse(request, judge.config.retireBelow) }));
-    const run = await fixture.session([createContextExtension({ policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
     assert.equal(fixture.requests.length, 0);
@@ -106,7 +106,7 @@ test('judge service and response failures are not misclassified as budget failur
       judge.respond((request) => failure === 'http'
         ? { status: 529, body: { error: 'Overloaded' } }
         : { body: { ...jevResponse(request), model: 'different-model' } });
-      const run = await fixture.session([createContextExtension({ policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
       await run.session.prompt('Continue.');
       assert.equal(data<{ kind: string }>(manager, STOP_ENTRY)[0]!.kind, 'judge');
       assert.equal(data(manager, SELECTION_ENTRY).length, 0);
@@ -124,15 +124,15 @@ test('no pressure, no candidates, and oversized judge input never call Jev', asy
   const fixture = await createPiFixture();
   const judge = await createJevFixture();
   try {
-    const small = await fixture.session([createContextExtension({ policy: 'jev-v1', budget: roomy, jev: judge.config })]);
+    const small = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget: roomy, jev: judge.config })]);
     await small.session.prompt('Small task.');
     assert.equal(fixture.requests.length, 1);
-    const protectedOnly = await fixture.session([createContextExtension({ policy: 'jev-v1', budget: { ...roomy, contextLimit: 100 }, jev: judge.config })]);
+    const protectedOnly = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget: { ...roomy, contextLimit: 100 }, jev: judge.config })]);
     await protectedOnly.session.prompt('Protected task.');
     assert.equal(data<{ kind: string }>(protectedOnly.manager, STOP_ENTRY)[0]!.kind, 'budget');
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seed(manager, true);
-    const large = await fixture.session([createContextExtension({ policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
+    const large = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
     await large.session.prompt('Cannot fit the whole candidate.');
     assert.equal(data<{ kind: string }>(manager, STOP_ENTRY)[0]!.kind, 'judge');
     assert.equal(data(manager, JUDGE_START_ENTRY).length, 0);
@@ -154,7 +154,7 @@ test('cancellation and a branch move during judging cannot install a late decisi
       const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
       seed(manager);
       const previousLeaf = manager.getLeafId()!;
-      const run = await fixture.session([createContextExtension({ policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget: { ...roomy, contextLimit: 2000 }, jev: judge.config })], manager);
       const pending = run.session.prompt('Continue.');
       await entered.promise;
       assert.equal(data(manager, JUDGE_START_ENTRY).length, 1);

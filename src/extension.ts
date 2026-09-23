@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
-import type { ExtensionContext, ExtensionFactory } from '@earendil-works/pi-coding-agent';
+import type { ExtensionContext, ExtensionFactory, SessionManager } from '@earendil-works/pi-coding-agent';
 import { measureRequest, type BudgetMeasurement, type RequestBudget } from './budget.ts';
 import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
@@ -9,8 +9,8 @@ import { applySelection, prepareSelection, selectionEvents, validateSelectionCon
 import { prepareJevRequest } from './judge-state.ts';
 import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
 import {
-  buildView, readHistory, SELECTION_ENTRY, validateSelection,
-  type HistoryView, type SelectionRecord,
+  buildView, commitSelection, readHistory, validateSelection,
+  type HistoryView,
 } from './history.ts';
 
 export const STOP_ENTRY = 'jev-context/stop';
@@ -48,7 +48,7 @@ interface Attempt {
   id: string;
   sessionId: string;
   leafId: string | null;
-  selection?: SelectionRecord;
+  selection?: string[];
   view?: { history: HistoryView; messages: AgentMessage[]; originals: AgentMessage[] };
   reconsideration?: {
     events: ReturnType<typeof selectionEvents>;
@@ -64,7 +64,7 @@ interface Attempt {
 }
 
 /** Explicitly loaded by the isolated SDK harness, not installed in the user's Pi. */
-export function createContextExtension(options: ContextOptions): ExtensionFactory {
+export function createContextExtension(manager: SessionManager, options: ContextOptions): ExtensionFactory {
   if (options.policy !== 'oldest-first-v1' && options.policy !== 'scripted-v1' && options.policy !== 'jev-v1' && options.policy !== 'jev-select-v1') {
     throw new Error('Unsupported selection policy');
   }
@@ -75,17 +75,18 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
   if (options.policy === 'jev-select-v1') validateSelectionConfig(options.selection, options.jev.retireBelow);
   return (pi) => {
     let attempt: Attempt | undefined;
+    let writeFailed = false;
 
     function sameBranch(ctx: ExtensionContext, current: Attempt): boolean {
-      return ctx.sessionManager.getSessionId() === current.sessionId &&
-        ctx.sessionManager.getLeafId() === current.leafId;
+      return ctx.sessionManager === manager && manager.getSessionId() === current.sessionId &&
+        manager.getLeafId() === current.leafId;
     }
 
     function stop(ctx: ExtensionContext, current: Attempt, reason: string, kind?: 'judge') {
       current.stopped = true;
       current.cancelled = ctx.signal?.aborted ?? false;
       ctx.abort();
-      if (sameBranch(ctx, current)) {
+      if (!writeFailed && sameBranch(ctx, current)) {
         pi.appendEntry(STOP_ENTRY, {
           version: 1, requestId: current.id, reason,
           kind: current.cancelled ? 'cancelled' : kind ?? (current.budget?.fits === false ? 'budget' : 'invalid'),
@@ -108,6 +109,8 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
       try {
         const signal = ctx.signal;
         if (!signal) throw new Error('Context selection requires an active run');
+        if (writeFailed) throw new Error('Session writes failed; reopen a complete session branch before continuing');
+        if (!sameBranch(ctx, current)) throw new Error('Context extension is bound to a different session manager');
         signal.throwIfAborted();
         const history = readHistory(structuredClone(ctx.sessionManager.getBranch()), event.messages);
         const proposed = options.policy === 'scripted-v1' && options.select
@@ -117,9 +120,9 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
         const retiredIds = validateSelection(history, proposed ?? history.retiredIds);
         if (proposed !== null && (history.lastSelection?.policy !== options.policy ||
             JSON.stringify(retiredIds) !== JSON.stringify([...history.retiredIds].sort()))) {
-          current.selection = { version: 1, policy: options.policy, sourceLeafId: current.leafId, retiredIds };
+          current.selection = retiredIds;
         }
-        const messages = buildView(event.messages, history, retiredIds);
+        const messages = current.selection ? buildView(event.messages, history, retiredIds) : event.messages;
         current.view = { history, messages, originals: event.messages };
         return { messages };
       } catch (error) {
@@ -200,20 +203,20 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
             };
           }
           if (checkpoint || JSON.stringify([...proposal.retiredIds].sort()) !== JSON.stringify([...history.retiredIds].sort())) {
-            current.selection = {
-              version: 1, policy: options.policy, sourceLeafId: current.leafId,
-              retiredIds: proposal.retiredIds,
-            };
+            current.selection = proposal.retiredIds;
           }
         } else {
           current.budget = measureRequest(payload, ctx.model, options.budget);
         }
         if (!current.budget.fits) throw new Error('Selected request exceeds the context budget');
         if (current.selection) {
-          pi.appendEntry(SELECTION_ENTRY, { ...current.selection,
-            ...(current.reconsideration && { reconsideration: current.reconsideration }),
-          });
-          current.leafId = ctx.sessionManager.getLeafId();
+          try {
+            commitSelection(manager, current.selection, options.policy, current.reconsideration);
+          } catch (error) {
+            writeFailed = true;
+            throw error;
+          }
+          current.leafId = manager.getLeafId();
         }
         return payload;
       } catch (error) {
@@ -229,7 +232,7 @@ export function createContextExtension(options: ContextOptions): ExtensionFactor
       if (event.message.role !== 'assistant' || !attempt) return;
       const current = attempt;
       attempt = undefined;
-      if (!sameBranch(ctx, current)) return;
+      if (writeFailed || !sameBranch(ctx, current)) return;
       const message = event.message;
       pi.appendEntry(USAGE_ENTRY, {
         version: 1, requestId: current.id,

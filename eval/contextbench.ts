@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { truncateHead, type SessionEntry } from '@earendil-works/pi-coding-agent';
+import { buildSessionProjection, truncateHead, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import { measureRequest } from '../src/budget.ts';
-import { buildView, readHistory, type Evidence } from '../src/history.ts';
+import { readHistory, type Evidence } from '../src/history.ts';
 import { mapProviderEvidence } from '../src/provider-view.ts';
 
 export const CONTEXTBENCH_REVISION = '1436c28a8eb95496da4ea69ad458b9f8a8eb7d61';
@@ -89,9 +89,8 @@ export function captureRequest(input: {
   if (new Set(branchIds).size !== branchIds.length || branch.some((entry, index) => entry.parentId !== (branch[index - 1]?.id ?? null))) {
     throw new Error('Capture requires a complete, ordered active branch');
   }
-  const messages = branch.flatMap((entry) => entry.type === 'message' ? [entry.message] : []);
-  const history = readHistory(branch, messages);
-  const view = buildView(messages, history, history.retiredIds);
+  const view = buildSessionProjection(branch).messages;
+  const history = readHistory(branch, view);
   measureRequest(payload, model, { contextLimit: model.contextWindow, marginTokens: 0 });
   const mapped = mapProviderEvidence(payload, view, history.evidence);
   const wire = payload as { messages: Array<Record<string, unknown>> };

@@ -76,13 +76,13 @@ export async function runScriptedPi(options: {
     if (!model) throw new Error('Missing scripted model');
     const settings = SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const budget = { contextLimit: mode === 'budget-stop' ? 1 : 32768, marginTokens: 1024 };
+    manager = SessionManager.create(workspace, join(artifacts, 'sessions'));
     const loader = new DefaultResourceLoader({
       cwd: workspace, agentDir, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [createContextExtension({ policy: 'oldest-first-v1', budget })],
+      extensionFactories: [createContextExtension(manager, { policy: 'oldest-first-v1', budget })],
     });
     await loader.reload();
-    manager = SessionManager.create(workspace, join(artifacts, 'sessions'));
     if (source) capture = (payload) => appendFileSync(capturesPath, JSON.stringify(captureRequest({
       sessionId: manager!.getSessionId(), requestId: `http-${calls}`, branch: manager!.getBranch(), payload, model, source,
     })) + '\n');
