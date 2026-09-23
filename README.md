@@ -6,7 +6,7 @@ This repository contains deterministic and Jev retirement policies plus an exper
 
 ## Run the checks
 
-Requires Node.js 22.19.0 or newer. The Pi SDK is pinned to 0.85.1.
+Requires Node.js 22.19.0 or newer. The Pi SDK is pinned to 0.87.1.
 
 ```sh
 npm ci
@@ -100,7 +100,7 @@ This offline command prints an authored fixture report, not a benchmark result. 
 
 `eval/contextbench.ts` owns three boundaries. `captureRequest` checks original branch evidence against the selected tool text actually dispatched, including retirement stubs and historical restoration labels. It records payload/source hashes, evidence identities, visibility and source mappings. `analyzeCaptures` receives evaluator-only reference spans after capture and reports discovery, current visibility, observed retirement/restoration transitions and unmapped reasons. `exportDiscovery` emits the discovery-step shape accepted by [ContextBench's parser](https://github.com/EuniAI/ContextBench/blob/1436c28a8eb95496da4ea69ad458b9f8a8eb7d61/contextbench/parsers/trajectory.py), not an official evaluation or final patch-context prediction.
 
-**Mapping.** Only successful, untruncated text `read` results can map to base-source lines. The mapper reproduces Pi 0.85.1's range selection and footer using its pinned truncation helper, requires exact original-text equality, then excludes the trailing empty pseudo-line. Restored results map from their preserved originals after the historical wire label is verified separately. Shell output, unavailable source, errors and changed content stay explicitly unmapped. Matching base lines does not prove that historical content describes the current filesystem. The source snapshot is evaluator input, not additional context sent to the agent or Jev.
+**Mapping.** Only successful, untruncated text `read` results can map to base-source lines. The mapper reproduces Pi 0.87.1's range selection and footer using its pinned truncation helper, requires exact original-text equality, then excludes the trailing empty pseudo-line. Restored results map from their preserved originals after the historical wire label is verified separately. Shell output, unavailable source, errors and changed content stay explicitly unmapped. Matching base lines does not prove that historical content describes the current filesystem. The source snapshot is evaluator input, not additional context sent to the agent or Jev.
 
 **Meaning and limits.** Discovery means a tool observation exists in captured branch history, not proof that the model used it. Coverage unions overlapping and adjacent mapped lines. It is a mapped lower bound with separate unknown counts, not an estimate that unmapped evidence is irrelevant. No reference lines yields `null`, not perfect coverage. No captured requests yields `no-captures`. The first capture has unknown prior transitions. Later captures must extend the same session branch and source snapshot. Capture IDs belong to the transport observer and are not extension usage IDs. Only received HTTP requests are counted. Budget stops, missing transport captures, task correctness and costs need separate run accounting before any campaign.
 
@@ -108,7 +108,7 @@ This offline command prints an authored fixture report, not a benchmark result. 
 
 ## Behavior proved locally
 
-Tests demonstrate the following properties against Pi 0.85.1 and the local fixture.
+Tests demonstrate the following properties against Pi 0.87.1 and the local fixture.
 
 - Original session message entries remain unchanged on disk while the model receives a selected view.
 - Repeated requests preserve the existing serialized message prefix when the view is unchanged.
@@ -121,6 +121,8 @@ Tests demonstrate the following properties against Pi 0.85.1 and the local fixtu
 - Fixture Jev scores can preserve older evidence while retiring a newer eligible result. Scores at the cutoff, invalid responses, cancellation, and oversized judge inputs cannot force a retirement. Judge failures are recorded separately from coding-request budget stops.
 - Disabling native automatic compaction prevents summarization and retry after a simulated provider overflow.
 - Input, output, cache, and cost fields exposed by Pi are captured with the request's budget measurement.
+- System-prompt and active-tool changes reach the provider without changing evidence identity or protection.
+- Separate SDK-only tests verify native context replacement, restoration, resume, and branch navigation against actual loopback requests while preserving raw entries. The selection extension does not yet use native edits.
 
 These checks do not establish live cache hits, Jev selection quality, or monetary savings.
 
@@ -130,13 +132,15 @@ These checks do not establish live cache hits, Jev selection quality, or monetar
 
 **Selection records.** Version 1 records contain the policy identifier, source leaf, and full set of retired session-entry IDs. Restored evidence is identified from previous retirements on that branch. No separate database is used. Unsupported record versions and histories containing summaries are rejected rather than silently reinterpreted. Reused tool-call IDs across valid assistant turns are also rejected. Providers that reuse IDs need an expanded identity mapping before they are supported.
 
+**Native context edits.** Pi 0.87.1 adds [append-only context edits](https://github.com/earendil-works/pi/blob/v0.87.1/packages/coding-agent/docs/session-format.md#contexteditentry). This upgrade preserves our existing selection records and request-local view. The selection extension explicitly stops on a branch containing native edits rather than mixing two sources of context state. Adopting native projection is a separate ownership change. Its integration must preserve our final-payload budget check and cancellation behavior. The extension's native edit hooks run at lifecycle boundaries, not at that final request check.
+
 **Commit boundary.** The context hook reconstructs the recorded view and applies any scripted selection. Automatic retirement runs at the provider-request hook, where the payload includes system text, tool schemas, and the output allowance. Both paths validate selections and record them only after the final payload passes the budget check, before dispatch. A recorded selection does not imply the provider accepted the request or the task succeeded.
 
 **Provider mapping.** Automatic retirement supports text-only OpenAI Completions payloads with unchanged, unique tool-call IDs. Before replacing text, it verifies that the outgoing result matches the selected view, including historical labels and Pi's Unicode sanitation. If Pi has normalized a candidate's ID, or the result mapping is missing, ambiguous, or changed, selection stops rather than guessing. Other extension stacks and provider APIs remain unverified.
 
 **Budget estimate.** The initial estimator supports text-only `openai-completions` payloads. It counts UTF-8 bytes of the serialized payload as an input-token estimate, adds an explicit margin, and reserves the request's actual maximum output tokens. This includes system text and tool definitions, but it is not an exact tokenizer or a universal upper-bound proof. It can stop a request that would actually fit. The test fixture uses a 1,024-token margin, not a calibrated product default. Multimodal payloads and other provider APIs stop explicitly until supported accounting exists. Images are preserved by the view builder, but are not yet supported end to end by the budget gate.
 
-**Compaction and failures.** The SDK harness disables native automatic compaction in isolated settings. The extension also cancels compaction hooks. There is no summary fallback or substitute selector. Stop records distinguish budget rejection, invalid state, and cancellation because Pi can label an early cancellation as an error. User cancellation is not counted as a manager rejection or shown as a manager error notification. No global Pi settings are changed.
+**Compaction and failures.** The SDK harness disables native automatic compaction, automatic retries, and cache warming in isolated settings. The extension also cancels compaction hooks. There is no summary fallback or substitute selector. Stop records distinguish budget rejection, invalid state, and cancellation because Pi can label an early cancellation as an error. User cancellation is not counted as a manager rejection or shown as a manager error notification. No global Pi settings are changed.
 
 **Usage.** Records preserve Pi-normalized usage and its calculated cost fields, not raw provider billing. All-zero usage is marked unavailable rather than treated as evidence of a free request. Individual zero fields may be provider defaults rather than measured quantities. The fixture's usage numbers are synthetic and cannot establish actual cache behavior or prices.
 

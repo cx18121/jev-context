@@ -43,9 +43,9 @@ test('pressure retirement changes only selected wire text, persists before dispa
     let recordedAtDispatch = false;
     const selected = await fixture.session([
       createContextExtension({ policy: 'oldest-first-v1', budget }),
-      (pi) => pi.on('before_provider_request', () => {
+      (pi) => { pi.on('before_provider_request', () => {
         recordedAtDispatch = records(manager, SELECTION_ENTRY).length === 1;
-      }),
+      }); },
     ], manager, ['read']);
     await selected.session.prompt('Continue.');
     assert.equal(fixture.requests.length, 2);
@@ -140,11 +140,11 @@ test('a provider mapping mismatch stops explicitly instead of being swallowed an
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seedHistory(manager);
     const { session, errors } = await fixture.session([
-      (pi) => pi.on('before_provider_request', (event) => {
+      (pi) => { pi.on('before_provider_request', (event) => {
         const payload = structuredClone(event.payload) as FixtureRequest;
         tool(payload, 'old').tool_call_id = 'rewritten-id';
         return payload;
-      }),
+      }); },
       createContextExtension({ policy: 'oldest-first-v1', budget: { contextLimit: 100, marginTokens: 0 } }),
     ], manager);
     await session.prompt('Reject the mismatched mapping.');

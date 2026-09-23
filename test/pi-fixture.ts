@@ -86,6 +86,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
     },
     async session(factories: ExtensionFactory[] = [], manager = SessionManager.create(directory, join(directory, 'sessions')), tools: string[] = []) {
       const settings = SettingsManager.inMemory({
+        cacheWarming: 'off',
         compaction: { enabled: false },
         retry: { enabled: false, provider: { maxRetries: 0 } },
       });

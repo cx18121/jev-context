@@ -19,7 +19,7 @@ for (const mode of ['correct', 'wrong', 'budget-stop', 'http-error'] as SmokeMod
       const usage = JSON.parse(readFileSync(join(artifacts, 'usage.json'), 'utf8'));
       assert.equal(usage.measurementKind, 'scripted-fixture');
       assert.equal(usage.actualModelCostUsd, 0);
-      assert.equal(usage.piVersion, '0.85.1');
+      assert.equal(usage.piVersion, '0.87.1');
       assert.equal(usage.modelCalls, mode === 'budget-stop' ? 0 : mode === 'http-error' ? 1 : 2);
       const requests = readFileSync(join(artifacts, 'requests.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
       assert.equal(requests.length, usage.modelCalls);

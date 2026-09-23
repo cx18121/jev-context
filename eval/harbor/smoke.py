@@ -33,7 +33,7 @@ def main() -> None:
         (directory / "TASK-LICENSE").write_bytes(response.read())
     manifest = {
         "kind": "scripted-integration-smoke-not-model-evaluation", "harbor": "0.23.0",
-        "python": sys.version, "pi": "0.85.1", "node": "22.22.3", "task": TASK,
+        "python": sys.version, "pi": "0.87.1", "node": "22.22.3", "task": TASK,
         "taskRevision": REVISION, "taskFiles": hashes,
         "source": {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                    "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())},

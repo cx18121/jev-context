@@ -52,6 +52,9 @@ export function readHistory(branch: SessionEntry[], messages: AgentMessage[]): H
   const ancestors = new Set<string>();
 
   for (const entry of branch) {
+    if (entry.type === 'context_edit') {
+      throw new Error('Native context edits are not supported by this selection policy');
+    }
     if (entry.type === 'compaction' || entry.type === 'branch_summary') {
       throw new Error('Summarized histories are not supported by this prototype');
     }

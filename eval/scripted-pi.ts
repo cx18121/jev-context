@@ -74,7 +74,7 @@ export async function runScriptedPi(options: {
     });
     const model = runtime.getModel('jev-smoke', 'scripted-smoke');
     if (!model) throw new Error('Missing scripted model');
-    const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
+    const settings = SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const budget = { contextLimit: mode === 'budget-stop' ? 1 : 32768, marginTokens: 1024 };
     const loader = new DefaultResourceLoader({
       cwd: workspace, agentDir, settingsManager: settings,
@@ -113,7 +113,7 @@ export async function runScriptedPi(options: {
     const totals = records.reduce((sum, record) => ({ input: sum.input + record.usage.input, output: sum.output + record.usage.output,
       cacheRead: sum.cacheRead + record.usage.cacheRead, cacheWrite: sum.cacheWrite + record.usage.cacheWrite }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     writeFileSync(join(artifacts, 'usage.json'), JSON.stringify({
-      measurementKind: 'scripted-fixture', mode, nodeVersion: process.version, piVersion: '0.85.1',
+      measurementKind: 'scripted-fixture', mode, nodeVersion: process.version, piVersion: '0.87.1',
       modelCalls: calls, actualModelCostUsd: 0, syntheticUsage: totals,
       failure, extensionErrors: errors, records,
     }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });

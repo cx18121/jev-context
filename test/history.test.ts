@@ -134,6 +134,18 @@ test('aborted partial assistant calls do not block subsequent selection', () => 
   assert.equal(history.evidence.length, 2);
 });
 
+test('native context edits are rejected for user, assistant, and tool-result targets', () => {
+  for (const role of ['user', 'assistant', 'toolResult'] as const) {
+    const manager = SessionManager.inMemory();
+    seedHistory(manager);
+    const target = manager.getBranch().find((entry) => entry.type === 'message' &&
+      entry.message.role === role && (entry.message.role !== 'assistant' || entry.message.stopReason === 'stop'));
+    assert.ok(target);
+    manager.appendContextEdit(target.id, { content: 'Native replacement' });
+    assert.throws(() => snapshot(manager), /Native context edits are not supported/);
+  }
+});
+
 test('unknown record versions and off-branch source IDs fail explicitly', () => {
   const manager = SessionManager.inMemory();
   seedHistory(manager);
