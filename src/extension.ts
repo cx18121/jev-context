@@ -7,6 +7,7 @@ import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
 import { prepareJevRequest } from './judge-state.ts';
+import { mapProviderEvidence } from './provider-view.ts';
 import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
 import {
   buildView, commitSelection, readHistory, validateSelection,
@@ -149,6 +150,10 @@ export function createContextExtension(manager: SessionManager, options: Context
         if (!sameBranch(ctx, current)) throw new Error('Session branch changed before provider request');
         if (!ctx.model) throw new Error('Missing model');
         let payload = event.payload;
+        if (ctx.model.api === 'openai-codex-responses') {
+          if (!current.view) throw new Error('Missing context view');
+          mapProviderEvidence(payload, current.view.messages, current.view.history.evidence, ctx.model);
+        }
         if (options.policy !== 'scripted-v1') {
           if (!current.view) throw new Error('Missing context view');
           const { history, messages, originals } = current.view;
@@ -177,10 +182,10 @@ export function createContextExtension(manager: SessionManager, options: Context
           let order = plan.candidates.map((candidate) => candidate.evidence.id);
           let relevance: Record<string, number> = {};
           if ((options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
-            const prepared = prepareJevRequest(plan, messages);
+            const prepared = prepareJevRequest(plan, messages, ctx.model.api);
             pi.appendEntry(JUDGE_START_ENTRY, {
               version: 1, requestId: current.id, sourceLeafId: current.leafId,
-              policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION,
+              policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION, stateProviderApi: ctx.model.api,
               endpoint: options.jev.endpoint ?? JEV_ENDPOINT,
               candidateIds: order, retireBelow: options.jev.retireBelow, timeoutMs: options.jev.timeoutMs,
               requestBytes: prepared.requestBytes, maxPairBytes: prepared.maxPairBytes,

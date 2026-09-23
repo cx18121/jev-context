@@ -45,7 +45,7 @@ test('judge state preserves middle-turn corrections, conversation authority, and
   appendExchange(manager, [result('latest', 'Test environment ready.')]);
   manager.appendMessage({ role: 'user', content: 'Continue.', timestamp: 6 });
   const fixture = prepared(manager);
-  const { request, requestBytes, maxPairBytes } = prepareJevRequest(fixture.plan, fixture.messages);
+  const { request, requestBytes, maxPairBytes } = prepareJevRequest(fixture.plan, fixture.messages, model.api);
   const state = JSON.stringify(request.state);
   assert.match(state, /System-level constraints/);
   assert.match(state, /do not edit schema.sql/);
@@ -68,7 +68,7 @@ test('large task state or a large whole candidate fails without clipping either'
     appendExchange(manager, [result('old', oversized === 'candidate' ? 'observation'.repeat(4000) : 'data'.repeat(200))]);
     appendExchange(manager, [result('new', 'protected')]);
     const fixture = prepared(manager);
-    assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages), /state plus a whole candidate/);
+    assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages, model.api), /state plus a whole candidate/);
   }
 });
 
@@ -78,5 +78,5 @@ test('a full batch that exceeds the total cap fails instead of judging a partial
   appendExchange(manager, [result('new', 'protected')]);
   const fixture = prepared(manager);
   assert.equal(fixture.plan.candidates.length, 60);
-  assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages), /Full Jev candidate batch/);
+  assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages, model.api), /Full Jev candidate batch/);
 });

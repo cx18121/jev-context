@@ -83,6 +83,7 @@ export function captureRequest(input: {
   model: Model<Api>; source: SourceSnapshot;
 }): RequestCapture {
   const { branch, source, payload, model } = input;
+  if (model.api !== 'openai-completions') throw new Error('ContextBench capture currently supports only openai-completions');
   if (!input.sessionId || !input.requestId) throw new Error('Missing capture identity');
   const sourceIdentity = sourceHash(source);
   const branchIds = branch.map((entry) => entry.id);
@@ -92,7 +93,7 @@ export function captureRequest(input: {
   const view = buildSessionProjection(branch).messages;
   const history = readHistory(branch, view);
   measureRequest(payload, model, { contextLimit: model.contextWindow, marginTokens: 0 });
-  const mapped = mapProviderEvidence(payload, view, history.evidence);
+  const mapped = mapProviderEvidence(payload, view, history.evidence, model);
   const wire = payload as { messages: Array<Record<string, unknown>> };
   if (wire.messages.filter((message) => message.role === 'tool').length !== mapped.length) {
     throw new Error('Provider contains unaccounted tool results');

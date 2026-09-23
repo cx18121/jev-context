@@ -1,9 +1,10 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
+import type { Api, ImageContent, TextContent } from '@earendil-works/pi-ai';
 import { JevError, JEV_MODEL, type JevRequest } from './jev.ts';
 import type { Evidence, HistoryView } from './history.ts';
+import { providerInstructions } from './provider-view.ts';
 
 export interface JudgeInput {
   payload: unknown;
@@ -20,13 +21,16 @@ function textContent(content: string | (TextContent | ImageContent)[]) {
     block.type === 'text' ? { type: 'text', text: block.text } : { type: 'omitted-image' });
 }
 
-export function prepareJevRequest(plan: JudgeInput, messages: AgentMessage[]) {
+export function prepareJevRequest(plan: JudgeInput, messages: AgentMessage[], api: Api) {
   const candidateIds = new Set(plan.candidates.map((candidate) => candidate.evidence.id));
   const retiredIds = new Set(plan.history.retiredIds);
   const evidence = new Map(plan.history.evidence.map((item) => [item.result.toolCallId, item]));
   const conversation: unknown[] = [];
   for (const message of messages) {
     switch (message.role) {
+      case 'system':
+        // Read the provider-rendered instructions below, including system updates.
+        break;
       case 'user':
         conversation.push({ role: 'user', content: textContent(message.content) });
         break;
@@ -60,10 +64,8 @@ export function prepareJevRequest(plan: JudgeInput, messages: AgentMessage[]) {
         throw new JevError('Unsupported message in judge state');
     }
   }
-  const payload = plan.payload as { messages: Array<Record<string, unknown>> };
   const state = {
-    instructions: payload.messages.filter((message) => message.role === 'system' || message.role === 'developer')
-      .map((message) => ({ role: message.role, content: message.content })),
+    instructions: providerInstructions(plan.payload, api),
     conversation,
   };
   const request: JevRequest = { model: JEV_MODEL, state, questions: {} };

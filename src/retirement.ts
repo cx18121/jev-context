@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { mapProviderEvidence } from './provider-view.ts';
+import { mapProviderEvidence, replaceProviderText } from './provider-view.ts';
 import { measureRequest, type BudgetMeasurement, type RequestBudget } from './budget.ts';
 import { retirementText, validateSelection, type Evidence, type HistoryView } from './history.ts';
 
@@ -34,7 +34,7 @@ export function prepareRetirement(
   if (before.fits) return { payload, history, before, candidates };
 
   const eligible = history.evidence.filter((item) => !item.protectedReason && !retired.has(item.id));
-  for (const mapped of mapProviderEvidence(payload, messages, eligible)) {
+  for (const mapped of mapProviderEvidence(payload, messages, eligible, model)) {
     const stub = retirementText(mapped.evidence);
     const saving = Buffer.byteLength(JSON.stringify(mapped.text), 'utf8') - Buffer.byteLength(JSON.stringify(stub), 'utf8');
     if (saving > 0) candidates.push({ ...mapped, stub, saving });
@@ -50,11 +50,11 @@ export function applyRetirement(plan: RetirementPlan, order: readonly string[], 
   if (new Set(order).size !== order.length || order.some((id) => !byId.has(id))) {
     throw new Error('Invalid retirement candidate ordering');
   }
-  const proposed = structuredClone(plan.payload) as { messages: Array<Record<string, unknown>> };
+  const proposed = structuredClone(plan.payload);
   let remaining = plan.before.inputEstimate + plan.before.outputReserve + plan.before.marginTokens - plan.before.contextLimit;
   for (const id of order) {
     const candidate = byId.get(id)!;
-    proposed.messages[candidate.messageIndex]!.content = candidate.stub;
+    replaceProviderText(proposed, model.api, candidate.messageIndex, candidate.stub);
     retired.add(id);
     remaining -= candidate.saving;
     if (remaining <= 0) break;

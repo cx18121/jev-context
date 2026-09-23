@@ -121,7 +121,7 @@ export function prepareFixture(scenario: Scenario) {
     })),
   ], max_tokens: 100 };
   const plan = prepareRetirement(payload, view, history, model, { contextLimit: 100, marginTokens: 0 });
-  const prepared = prepareJevRequest(plan, view);
+  const prepared = prepareJevRequest(plan, view, model.api);
   if (JSON.stringify(Object.keys(prepared.request.questions)) !== JSON.stringify(Object.keys(expectations))) {
     throw new Error(`Candidate coverage differs from authored expectations: ${scenario.id}`);
   }

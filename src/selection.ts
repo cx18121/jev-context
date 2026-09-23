@@ -4,7 +4,7 @@ import type { Api, Model } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { measureRequest, type RequestBudget } from './budget.ts';
 import { buildView, retirementText, SELECTION_ENTRY, validateSelection, type HistoryView } from './history.ts';
-import { mapProviderEvidence, providerText } from './provider-view.ts';
+import { mapProviderEvidence, providerText, replaceProviderText } from './provider-view.ts';
 import { applyRetirement, type RetirementCandidate, type RetirementPlan } from './retirement.ts';
 
 export const SELECTION_POLICY = 'jev-select-v1';
@@ -69,7 +69,7 @@ export function prepareSelection(
   const restored = new Map(buildView(history.evidence.map((item) => item.result), history, [])
     .filter((message) => message.role === 'toolResult').map((message) => [message.toolCallId, message]));
   const candidates: SelectionCandidate[] = [];
-  for (const mapped of mapProviderEvidence(payload, messages, eligible)) {
+  for (const mapped of mapProviderEvidence(payload, messages, eligible, model)) {
     const archived = archive.has(mapped.evidence.id);
     const text = archived ? providerText(restored.get(mapped.evidence.result.toolCallId)!) : mapped.text;
     const stub = retirementText(mapped.evidence);
@@ -93,9 +93,9 @@ export function applySelection(
     .map((item) => item.evidence.id);
   const restored = new Set(restoredIds);
   const retiredIds = plan.history.retiredIds.filter((id) => !restored.has(id));
-  const payload = structuredClone(plan.payload) as { messages: Array<Record<string, unknown>> };
+  const payload = structuredClone(plan.payload);
   for (const item of plan.candidates) {
-    if (restored.has(item.evidence.id)) payload.messages[item.messageIndex]!.content = item.text;
+    if (restored.has(item.evidence.id)) replaceProviderText(payload, model.api, item.messageIndex, item.text);
   }
   const visible = plan.candidates.filter((item) => !item.archived);
   const order = visible.filter((item) => relevance[item.evidence.id]! < retireBelow)

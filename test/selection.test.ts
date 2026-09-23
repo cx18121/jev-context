@@ -41,7 +41,7 @@ test('restoration judges and renders historical original text, not stubs; unchan
   const f = fixture();
   const { plan, budget } = f.plan();
   const before = structuredClone({ history: f.history, payload: f.payload });
-  const request = prepareJevRequest(plan, f.view).request;
+  const request = prepareJevRequest(plan, f.view, model.api).request;
   const candidate = request.questions[f.a]!.instructions.candidate as { observation: string };
   assert.match(candidate.observation, /restored historical observation/);
   assert.ok(candidate.observation.endsWith(providerText(f.history.evidence[0]!.result)));
