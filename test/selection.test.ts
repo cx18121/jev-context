@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
+import { measureRequest } from '../src/budget.ts';
 import { commitSelection, buildView, readHistory, SELECTION_ENTRY } from '../src/history.ts';
 import { prepareJevRequest } from '../src/judge-state.ts';
 import { providerText } from '../src/provider-view.ts';
@@ -124,10 +125,81 @@ test('only complete exchanges trigger, including a complete non-text exchange', 
 });
 
 test('invalid limits, overlapping thresholds, archive identities and partial scores fail explicitly', () => {
-  for (const archiveLimit of [0, -1, 1.5, Infinity]) assert.throws(() => validateSelectionConfig({ archiveLimit, restoreAtOrAbove: 0.8 }, 0.2), /archiveLimit/);
-  for (const restoreAtOrAbove of [0.1, 0.2, 1.1, NaN]) assert.throws(() => validateSelectionConfig({ archiveLimit: 2, restoreAtOrAbove }, 0.2), /restoreAtOrAbove/);
+  for (const archiveLimit of [0, -1, 1.5, Infinity]) assert.throws(() => validateSelectionConfig({ archiveLimit, restoreAtOrAbove: 0.8 }, 0.2, { contextLimit: 100_000, marginTokens: 0 }), /archiveLimit/);
+  for (const restoreAtOrAbove of [0.1, 0.2, 1.1, NaN]) assert.throws(() => validateSelectionConfig({ archiveLimit: 2, restoreAtOrAbove }, 0.2, { contextLimit: 100_000, marginTokens: 0 }), /restoreAtOrAbove/);
   const f = fixture();
   for (const ids of [[f.a, f.a], [f.b], ['missing']]) assert.throws(() => prepareSelection(f.payload, f.view, f.history, model, { contextLimit: 100000, marginTokens: 0 }, ids), /archive candidate/);
   const { plan, budget } = f.plan();
   assert.throws(() => applySelection(plan, { [f.a]: 0.9 }, 0.2, 0.8, model, budget), /scores/);
+});
+
+test('soft pressure builds candidates before the hard limit, with an inclusive target boundary', () => {
+  const f = fixture();
+  const budget = { contextLimit: 100_000, marginTokens: 0 };
+  const prepare = (workingContextLimit: number) => prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit });
+  const exact = prepare(f.size);
+  assert.equal(exact.workingBefore.fits, true);
+  assert.equal(exact.candidates.length, 0);
+  const plan = prepare(f.size - 1);
+  assert.equal(plan.before.fits, true);
+  assert.equal(plan.workingBefore.fits, false);
+  assert.deepEqual(plan.candidates.map((item) => item.evidence.id), [f.b]);
+  const selected = applySelection(plan, { [f.b]: 0.1 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(new Set(selected.retiredIds), new Set([f.a, f.b]));
+  assert.equal(selected.workingBudget.fits, true);
+  assert.deepEqual(selected.budget, measureRequest(selected.payload, model, budget));
+  assert.equal(selected.budget.fits, true);
+  assert.equal(selected.budget.contextLimit, 100_000);
+});
+
+test('a missed soft target neither retires relevant evidence nor becomes a hard-budget failure', () => {
+  const f = fixture();
+  const budget = { contextLimit: 100_000, marginTokens: 0 };
+  const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit: 1 });
+  for (const score of [0.1, 0.2, 0.9]) {
+    const selected = applySelection(plan, { [f.b]: score }, 0.2, 0.8, model, budget);
+    assert.equal(selected.workingBudget.fits, false);
+    assert.equal(selected.budget.fits, true);
+    assert.deepEqual(new Set(selected.retiredIds), new Set(score < 0.2 ? [f.a, f.b] : [f.a]));
+    assert.equal((selected.payload as typeof f.payload).messages.at(-1)!.content, 'Protected');
+  }
+});
+
+test('restorations consume the soft allowance but are never re-retired to satisfy it', () => {
+  const f = fixture();
+  const budget = { contextLimit: 100_000, marginTokens: 0 };
+  const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [f.a], { workingContextLimit: f.size });
+  for (const score of [0.1, 0.9]) {
+    const selected = applySelection(plan, { [f.a]: 0.9, [f.b]: score }, 0.2, 0.8, model, budget);
+    assert.deepEqual(selected.restoredIds, [f.a]);
+    assert.deepEqual(selected.retiredIds, score < 0.2 ? [f.b] : []);
+    assert.equal(selected.workingBudget.fits, score < 0.2);
+    assert.equal(selected.budget.fits, true);
+  }
+});
+
+test('without a fresh event soft pressure waits, while hard pressure still selects', () => {
+  const f = fixture();
+  for (const contextLimit of [100_000, f.size - 1]) {
+    const budget = { contextLimit, marginTokens: 0 };
+    const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit: 1, reconsider: false });
+    assert.equal(plan.candidates.length, contextLimit === 100_000 ? 0 : 1);
+    const selected = applySelection(plan, contextLimit === 100_000 ? {} : { [f.b]: 0.1 }, 0.2, 0.8, model, budget);
+    assert.equal(selected.budget.fits, true);
+    assert.equal(selected.workingBudget.fits, false);
+    if (contextLimit === 100_000) assert.deepEqual(selected.payload, f.payload);
+  }
+});
+
+test('working target validates both the configured hard limit and the effective model window', () => {
+  const f = fixture();
+  const budget = { contextLimit: 100_000, marginTokens: 0 };
+  for (const workingContextLimit of [0, -1, 1.5, Infinity, NaN, 100_001]) {
+    assert.throws(() => validateSelectionConfig({ archiveLimit: 2, restoreAtOrAbove: 0.8, workingContextLimit }, 0.2, budget), /workingContextLimit/);
+    assert.throws(() => prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit }), /workingContextLimit/);
+  }
+  assert.throws(() => prepareSelection(f.payload, f.view, f.history, { ...model, contextWindow: 10_000 }, budget, [], { workingContextLimit: 20_000 }), /effective hard/);
+  const omitted = prepareSelection(f.payload, f.view, f.history, model, budget, []);
+  assert.deepEqual(omitted.workingBefore, omitted.before);
+  assert.equal(omitted.candidates.length, 0);
 });

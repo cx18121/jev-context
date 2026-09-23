@@ -39,6 +39,7 @@ export interface UsageRecord {
   cancelled: boolean;
   responseReceived: boolean;
   budget: BudgetMeasurement | null;
+  workingContext?: BudgetMeasurement & { configuredLimit: number | null };
   usageSource: 'pi-normalized';
   usageAvailable: boolean;
   usage: Usage;
@@ -56,8 +57,10 @@ interface Attempt {
     restoreAtOrAbove: number;
     restoredIds?: string[];
     proposedRetiredIds?: string[];
+    workingContext?: UsageRecord['workingContext'];
   };
   budget?: BudgetMeasurement;
+  workingContext?: UsageRecord['workingContext'];
   stopped: boolean;
   cancelled: boolean;
   responseReceived: boolean;
@@ -72,7 +75,7 @@ export function createContextExtension(manager: SessionManager, options: Context
     throw new Error('Automatic retirement cannot use a scripted selector');
   }
   if (options.policy === 'jev-v1' || options.policy === 'jev-select-v1') validateJevConfig(options.jev);
-  if (options.policy === 'jev-select-v1') validateSelectionConfig(options.selection, options.jev.retireBelow);
+  if (options.policy === 'jev-select-v1') validateSelectionConfig(options.selection, options.jev.retireBelow, options.budget);
   return (pi) => {
     let attempt: Attempt | undefined;
     let writeFailed = false;
@@ -91,6 +94,7 @@ export function createContextExtension(manager: SessionManager, options: Context
           version: 1, requestId: current.id, reason,
           kind: current.cancelled ? 'cancelled' : kind ?? (current.budget?.fits === false ? 'budget' : 'invalid'),
           budget: current.budget ?? null,
+          ...(current.workingContext && { workingContext: current.workingContext }),
           ...(current.reconsideration && { reconsideration: current.reconsideration }),
         });
         current.leafId = ctx.sessionManager.getLeafId();
@@ -152,13 +156,17 @@ export function createContextExtension(manager: SessionManager, options: Context
           let checkpoint = false;
           if (options.policy === 'jev-select-v1') {
             const events = selectionEvents(ctx.sessionManager.getBranch(), history);
-            const due = history.retiredIds.length > 0 && (events.userIds.length > 0 || events.exchangeIds.length > 0);
+            const fresh = events.userIds.length > 0 || events.exchangeIds.length > 0;
+            const due = history.retiredIds.length > 0 && fresh;
             const lookup = due ? retrieveArchive(history, originals, options.selection.archiveLimit) : null;
             selectionPlan = prepareSelection(payload, messages, history, ctx.model, options.budget,
-              lookup?.candidates.map((item) => item.evidence.id) ?? []);
-            checkpoint = due || !selectionPlan.before.fits;
+              lookup?.candidates.map((item) => item.evidence.id) ?? [], { ...options.selection, reconsider: fresh });
+            current.workingContext = { ...selectionPlan.workingBefore,
+              configuredLimit: options.selection.workingContextLimit ?? null };
+            checkpoint = due || !selectionPlan.before.fits || (fresh && !selectionPlan.workingBefore.fits);
             if (checkpoint) current.reconsideration = {
               events, restoreAtOrAbove: options.selection.restoreAtOrAbove,
+              workingContext: current.workingContext,
               retrieval: lookup ? { version: RETRIEVAL_VERSION, limit: options.selection.archiveLimit,
                 poolSize: lookup.poolSize, matchedCount: lookup.matchedCount,
                 candidateIds: lookup.candidates.map((item) => item.evidence.id) } : null,
@@ -194,12 +202,16 @@ export function createContextExtension(manager: SessionManager, options: Context
           }
           const proposal = selectionPlan && options.policy === 'jev-select-v1'
             ? applySelection(selectionPlan, relevance, options.jev.retireBelow, options.selection.restoreAtOrAbove, ctx.model, options.budget)
-            : { ...applyRetirement(plan, order, ctx.model, options.budget), restoredIds: [] };
+            : { ...applyRetirement(plan, order, ctx.model, options.budget), restoredIds: [], workingBudget: undefined };
+          if (proposal.workingBudget && options.policy === 'jev-select-v1') {
+            current.workingContext = { ...proposal.workingBudget, configuredLimit: options.selection.workingContextLimit ?? null };
+          }
           payload = proposal.payload;
           current.budget = proposal.budget;
           if (current.reconsideration) {
             current.reconsideration = { ...current.reconsideration,
               restoredIds: proposal.restoredIds, proposedRetiredIds: proposal.retiredIds,
+              workingContext: current.workingContext,
             };
           }
           if (checkpoint || JSON.stringify([...proposal.retiredIds].sort()) !== JSON.stringify([...history.retiredIds].sort())) {
@@ -241,6 +253,7 @@ export function createContextExtension(manager: SessionManager, options: Context
         cancelled: current.cancelled || (ctx.signal?.aborted === true && !current.stopped),
         responseReceived: current.responseReceived,
         budget: current.budget ?? null,
+        ...(current.workingContext && { workingContext: current.workingContext }),
         usageSource: 'pi-normalized',
         usageAvailable: Object.values({
           input: message.usage.input, output: message.usage.output,
