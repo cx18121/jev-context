@@ -25,7 +25,6 @@ const [mode, taskFile, output, ...extra] = process.argv.slice(2);
 assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-brief-invalid-usage', '--live'].includes(mode)
   && taskFile && output && extra.length === 0, 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY');
 const live = mode === '--live';
-assert.ok(!live, 'Live selector runs await approval of the brief-inclusive inference budget. Local modes remain available.');
 const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const root = new URL('./', import.meta.url);
 const run = pathToFileURL(resolve(output) + '/');
@@ -315,7 +314,7 @@ try {
     assert.ok(report.completed, JSON.stringify(report.arms.map((a) => a.failure)));
     assert.equal(report.requests.filter((r) => r.dispatched).length, 10);
     assert.ok(report.judgeDispatches > 0);
-    assert.equal(report.briefRequests.length, 5);
+    assert.equal(report.briefRequests.length, 2, 'Only retirement and restoration need brief updates');
     assert.ok(report.briefRequests.every((r) => r.dispatched && r.usage && r.stopReason === 'stop'));
     assert.ok(report.arms[1].briefCatalogCostUsd > 0);
     assert.equal(report.arms[0].nativeEdits.length, 0);
@@ -333,7 +332,7 @@ try {
     assert.equal(report.arms[0].completed, true);
     assert.equal(report.arms[1].completed, false);
     assert.equal(report.briefRequests.filter((r) => r.dispatched).length, 1);
-    assert.equal(report.arms[1].requests.filter((r) => r.dispatched).length, 0);
+    assert.equal(report.arms[1].requests.filter((r) => r.dispatched).length, 2, 'Two ordinary turns precede the first demanded brief');
     assert.equal(report.judgeDispatches, 0);
   } else if (mode === '--local-judge-failure') {
     assert.equal(report.arms[0].completed, true); assert.equal(report.arms[1].completed, false);

@@ -55,6 +55,11 @@ export function guardedBrief({ runtime, model, sessionId, bounds, deadline, reco
         }).result();
         record.stopReason = response.stopReason;
         record.piUsage = response.usage;
+        // The SSE byte ceiling already bounds this text. Never persist private reasoning.
+        await save(`brief-${record.turn}-response.json`, {
+          stopReason: response.stopReason,
+          text: response.content.filter((block) => block.type === 'text').map((block) => block.text).join(''),
+        });
         assert.ok(record.usage, 'Missing or invalid brief usage');
         // The provider tap owns spend; the extension must see the same accounting.
         const u = response.usage, raw = record.usage;

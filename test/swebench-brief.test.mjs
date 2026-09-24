@@ -48,7 +48,10 @@ function fixture({ usage = raw, piUsage = normalized, text = '{}', responseBytes
         const response = await options.fetch(`${m.baseUrl}/codex/responses`, { method: 'POST',
           headers: { 'session-id': options.sessionId }, body: JSON.stringify(body) });
         await response.text();
-        return { stopReason: 'stop', usage: piUsage, content: [{ type: 'text', text }] };
+        return { stopReason: 'stop', usage: piUsage, content: [
+          { type: 'thinking', thinking: 'PRIVATE_REASONING', thinkingSignature: 'OPAQUE_SIGNATURE' },
+          { type: 'text', text },
+        ] };
       } };
     } },
   });
@@ -58,10 +61,12 @@ function fixture({ usage = raw, piUsage = normalized, text = '{}', responseBytes
 test('brief requests use a separate cache key, ledger and cap, preserving known-usage invalid text', async () => {
   const f = fixture({ text: 'invalid JSON' });
   const response = await f.config.complete(model, context, {});
-  assert.equal(response.content[0].text, 'invalid JSON'); // The extension, not transport, validates brief content.
+  assert.equal(response.content.find((block) => block.type === 'text').text, 'invalid JSON'); // The extension, not transport, validates brief content.
   assert.equal(f.records[0].accountingComplete, true);
   assert.ok(Math.abs(f.records[0].usage.catalogCostUsd - 0.00020784) < 1e-12);
   assert.equal(f.saved[0].body.prompt_cache_key, 'coding-session-brief');
+  assert.deepEqual(f.saved[1], { name: 'brief-1-response.json', body: { stopReason: 'stop', text: 'invalid JSON' } });
+  assert.doesNotMatch(JSON.stringify(f.saved), /PRIVATE_REASONING|OPAQUE_SIGNATURE/);
   assert.equal(f.dispatches(), 1); assert.equal(f.unknown(), false);
   await assert.rejects(f.config.complete(model, context, {}), /Brief request ceiling/);
   assert.equal(f.dispatches(), 1);

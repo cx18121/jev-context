@@ -119,6 +119,17 @@ export function createContextExtension(manager: SessionManager, options: Context
       if (!current.cancelled) ctx.ui.notify(`jev-context stopped: ${reason}`, 'error');
     }
 
+    function checkedBriefResult() {
+      const branch = manager.getBranch();
+      const lastStart = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_START_ENTRY);
+      const lastResult = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_RESULT_ENTRY);
+      const recorded = lastResult?.type === 'custom' ? lastResult.data as BriefResult & { updateId: string; inputHash: string } : undefined;
+      if (lastStart?.type === 'custom' && ((lastStart.data as { updateId: string }).updateId !== recorded?.updateId || recorded.pricedCostUsd === null)) {
+        throw new Error('Previous task brief request has unknown cost; further inference is stopped');
+      }
+      return recorded;
+    }
+
     async function refreshBrief(ctx: ExtensionContext, current: Attempt, payload: unknown, config: BriefConfig): Promise<TaskBrief | null> {
       const append = (kind: string, data: unknown) => {
         if (!sameBranch(ctx, current)) throw new Error('Session branch changed during task brief update');
@@ -132,12 +143,7 @@ export function createContextExtension(manager: SessionManager, options: Context
         append(BRIEF_SOURCE_ENTRY, { version: 1, text: instructions });
       }
       const branch = manager.getBranch();
-      const lastStart = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_START_ENTRY);
-      const lastResult = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_RESULT_ENTRY);
-      const recorded = lastResult?.type === 'custom' ? lastResult.data as BriefResult & { updateId: string; inputHash: string } : undefined;
-      if (lastStart?.type === 'custom' && ((lastStart.data as { updateId: string }).updateId !== recorded?.updateId || recorded.pricedCostUsd === null)) {
-        throw new Error('Previous task brief request has unknown cost; further inference is stopped');
-      }
+      const recorded = checkedBriefResult();
       const sources = taskSources(branch);
       const entry = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_ENTRY);
       let previous: TaskBrief | null;
@@ -232,17 +238,25 @@ export function createContextExtension(manager: SessionManager, options: Context
         if (options.policy !== 'scripted-v1') {
           if (!current.view) throw new Error('Missing context view');
           const { history, messages } = current.view;
-          const brief = options.policy === 'jev-select-v1' ? await refreshBrief(ctx, current, payload, options.brief) : null;
+          let brief: TaskBrief | null = null;
+          let briefNeeded = false;
           let selectionPlan;
           let checkpoint = false;
           if (options.policy === 'jev-select-v1') {
+            // Unknown prior spend stops even turns that do not need a brief.
+            checkedBriefResult();
             const events = selectionEvents(ctx.sessionManager.getBranch(), history);
             const fresh = events.userIds.length > 0 || events.exchangeIds.length > 0;
             const due = history.retiredIds.length > 0 && fresh;
+            const planOptions = { ...options.selection, reconsider: fresh, anchor: anchor?.usage };
+            selectionPlan = prepareSelection(payload, messages, history, ctx.model, options.budget, [], planOptions);
+            briefNeeded = due || selectionPlan.candidates.length > 0;
+            if (briefNeeded) brief = await refreshBrief(ctx, current, payload, options.brief);
             const lookup = due && brief ? retrieveArchive(history, briefQueryText(brief), options.selection.archiveLimit) : null;
-            selectionPlan = prepareSelection(payload, messages, history, ctx.model, options.budget,
-              lookup?.candidates.map((item) => item.evidence.id) ?? [],
-              { ...options.selection, reconsider: fresh, anchor: anchor?.usage });
+            if (lookup?.candidates.length) {
+              selectionPlan = prepareSelection(payload, messages, history, ctx.model, options.budget,
+                lookup.candidates.map((item) => item.evidence.id), planOptions);
+            }
             current.workingContext = { ...selectionPlan.workingBefore,
               configuredLimit: options.selection.workingContextLimit ?? null };
             checkpoint = due || !selectionPlan.before.fits || (fresh && selectionPlan.workingBefore.fits === false);
@@ -258,7 +272,7 @@ export function createContextExtension(manager: SessionManager, options: Context
           current.budget = plan.before;
           let order = plan.candidates.map((candidate) => candidate.evidence.id);
           let relevance: Record<string, number> = {};
-          let deferral: NonNullable<Attempt['reconsideration']>['deferral'] = options.policy === 'jev-select-v1' && !brief
+          let deferral: NonNullable<Attempt['reconsideration']>['deferral'] = briefNeeded && !brief
             ? { reason: 'task-brief-pending', unjudgedCandidateIds: order } : undefined;
           if (!deferral && (options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
             const preparedSelection = selectionPlan ? planJevSelection(plan, messages, ctx.model.api, brief!) : undefined;

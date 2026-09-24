@@ -2,9 +2,9 @@
 
 `run.mjs` runs one task twice through Pi 0.87.1 and Sol medium. Control uses the logging/budget extension without selection. Selector uses `jev-select-v1`. Both have the same prompt, tools, model, and fresh offline container. Native patch grading and ContextBench source coverage use those same trajectories.
 
-Task briefs use `openai-codex/gpt-6-luna` with low reasoning through the same Codex runtime as the coding model. Coding remains Sol 5.6 medium and relevance judgments remain Jev. Briefs have their own cache key, request ledger, guarded transport, catalog cost, and latency. They do not appear in coding evidence captures.
+Task briefs use `openai-codex/gpt-6-luna` with low reasoning through the same Codex runtime as the coding model. Coding remains Sol 5.6 medium and relevance judgments remain Jev. Briefs have their own cache key, request ledger, guarded transport, catalog cost, and latency. They are requested only when selection needs them, not on every coding turn. They do not appear in coding evidence captures. Private run artifacts include each brief request and its returned text and stop reason, including rejected updates. The transport response-byte ceiling bounds this capture; private reasoning and response headers are not included.
 
-**Live mode is paused pending approval of the brief-inclusive inference budget.** `--live` rejects before reading credentials, creating output, or starting Docker. Local modes exercise the real coding and brief SDK serializers against a loopback HTTP server with scripted responses. No paid inference occurs. Their usage and resulting costs are synthetic fixtures, not live measurements. Existing live artifacts describe their recorded code and protocol, not this implementation.
+`--live` makes paid inference requests and requires approval of the task and brief-inclusive spending limits before invocation. Local modes exercise the real coding and brief SDK serializers against a loopback HTTP server with scripted responses. No paid inference occurs in local modes. Their usage and resulting costs are synthetic fixtures, not live measurements. Existing artifacts describe their recorded code and protocol.
 
 ## Inputs and commands
 

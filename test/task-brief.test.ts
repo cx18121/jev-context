@@ -70,13 +70,28 @@ test('claims need exact scanned citations and cannot promote assistant or extens
   for (const item of sources.slice(1)) {
     assert.throws(() => applyBriefUpdate(plan, { ...empty(), add: [add(item)] }, sources), /cannot establish/);
   }
-  for (const bad of [
-    { ...ref(sources[0]!), sourceId: 'foreign' },
-    { ...ref(sources[0]!), quote: 'Invented quotation' },
-  ]) {
-    assert.throws(() => applyBriefUpdate(plan, { ...empty(), add: [{ ...add(sources[0]!), references: [bad] }] }, sources), /outside scanned/);
+  for (const [bad, reason] of [
+    [{ ...ref(sources[0]!), sourceId: 'foreign' }, /unknown source foreign/],
+    [{ ...ref(sources[0]!), quote: 'Invented quotation' }, /quote mismatch in u1/],
+  ] as const) {
+    assert.throws(() => applyBriefUpdate(plan, { ...empty(), add: [{ ...add(sources[0]!), references: [bad] }] }, sources), reason);
   }
   assert.throws(() => applyBriefUpdate(plan, { ...empty(), add: [{ ...add(sources[0]!), references: [] }] }, sources), /requires a source/);
+});
+
+test('JSON-encoded command citations require exact decoded text, not normalized whitespace or escapes', () => {
+  const command = { tool: 'bash', arguments: { command: 'printf "hello"\\ncat parser.ts', timeout: 120 } };
+  const sources = [source('u1', 'Fix the parser.'), source('a1', JSON.stringify(command), 'assistant')];
+  const plan = planBriefUpdate(sources, null)!;
+  const update = { ...empty(), add: [add(sources[0]!)],
+    activity: [{ text: 'Inspecting the parser', references: [ref(sources[1]!, 'parser.ts')] }] };
+  assert.equal(applyBriefUpdate(plan, JSON.parse(JSON.stringify(update)), sources).activity.length, 1);
+  const wrong = structuredClone(update);
+  wrong.activity[0]!.references[0]!.quote = command.arguments.command;
+  assert.throws(() => applyBriefUpdate(plan, wrong, sources), /quote mismatch in a1/);
+  const exact = structuredClone(update);
+  exact.activity[0]!.references[0]!.quote = sources[1]!.text;
+  assert.equal(applyBriefUpdate(plan, JSON.parse(JSON.stringify(exact)), sources).activity.length, 1);
 });
 
 test('large single sources make bounded incremental progress without splitting emoji', () => {

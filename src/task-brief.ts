@@ -49,6 +49,8 @@ export interface BriefUpdatePlan {
 }
 
 export const BRIEF_INSTRUCTIONS = `Maintain a compact, source-linked view of the unfinished user task. Return only a JSON object with retain, add, supersede, and activity arrays.
+Do not include analysis, commentary, Markdown fences, or text before or after the JSON object. All four keys are required, including empty arrays.
+For example, given a source {"id":"example-user","role":"user","text":"Fix the parser."}, a valid first update is {"retain":[],"add":[{"kind":"requirement","text":"Fix the parser","references":[{"sourceId":"example-user","quote":"Fix the parser."}]}],"supersede":[],"activity":[]}. These example IDs are not real sources. Copy actual sourceId values from source.id, never from a previous item's id. Quotes must match the decoded source.text exactly; preserve its whitespace and backslashes, using normal JSON escaping in the output. Prefer a short exact substring over reconstructing a whole command or sentence.
 retain contains IDs of previous items to preserve unchanged. add contains new {kind, text, references} items; kind is requirement, constraint, or question. Each reference is {sourceId, quote}. Quotes must be exact, nonempty excerpts from provided sources or previous references. A source chunk's start records progress, not an offset you need to calculate.
 Account for every previous item exactly once, either in retain or in supersede. supersede entries are {id, by: reference}; use a NEW explicit user correction, cancellation, or confirmation of completion to supersede a user item. Only a new system source can supersede a system item. Assistant plans or claims of completion never close requirements. Do not infer cancellation from a change of focus.
 activity is a replacement array of {text, references} describing recent assistant plans, progress, and unresolved work. It is non-authoritative. Requirements, constraints, and questions must cite user or system sources, never assistant or extension assertions. Keep their meaning and authority separate from activity.
@@ -102,9 +104,10 @@ function reference(value: unknown, sources: BriefSource[], cursor: Cursor): Brie
   const sourceId = text(data.sourceId), quote = text(data.quote);
   const index = sources.findIndex((source) => source.id === sourceId);
   const scannedIndex = sources.findIndex((source) => source.id === cursor.sourceId);
-  if (index < 0 || index > scannedIndex ||
-      !sources[index]!.text.slice(0, index === scannedIndex ? cursor.offset : undefined).includes(quote)) {
-    throw new Error('Task brief reference is outside scanned source text');
+  if (index < 0) throw new Error(`Task brief reference is outside scanned source text: unknown source ${sourceId}`);
+  if (index > scannedIndex) throw new Error(`Task brief reference is outside scanned source text: unscanned source ${sourceId}`);
+  if (!sources[index]!.text.slice(0, index === scannedIndex ? cursor.offset : undefined).includes(quote)) {
+    throw new Error(`Task brief reference is outside scanned source text: quote mismatch in ${sourceId}`);
   }
   return { sourceId, quote };
 }

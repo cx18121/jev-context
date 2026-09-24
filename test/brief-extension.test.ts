@@ -22,6 +22,69 @@ function seed(manager: SessionManager) {
   return old!;
 }
 
+test('fitting turns without an archive make no brief requests or instruction snapshots', async () => {
+  for (let sample = 0; sample < 3; sample++) {
+    const f = await createPiFixture(), judge = await createJevFixture();
+    try {
+      const brief = scriptedBrief(f.model);
+      brief.complete = async () => { assert.fail('No selection demand'); };
+      const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1',
+        budget: { contextLimit: 30000, marginTokens: 1024 },
+        selection: { ...selection, workingContextLimit: 20000 }, brief, jev: judge.config })]);
+      for (const text of ['Fix the parser.', 'Keep the API stable.', 'Continue.']) await run.session.prompt(text);
+      assert.equal(f.requests.length, 3);
+      assert.equal(judge.requests.length, 0);
+      for (const type of [BRIEF_SOURCE_ENTRY, BRIEF_START_ENTRY, BRIEF_RESULT_ENTRY, BRIEF_ENTRY, SELECTION_ENTRY]) {
+        assert.equal(entries(run.manager, type).length, 0);
+      }
+      assert.deepEqual(run.errors, []);
+    } finally { await f.close(); await judge.close(); }
+  }
+});
+
+test('soft pressure with no eligible observations checkpoints without a brief-pending deferral', async () => {
+  const f = await createPiFixture(), judge = await createJevFixture();
+  try {
+    f.reportInputTokens(2500);
+    const brief = scriptedBrief(f.model);
+    brief.complete = async () => { assert.fail('No eligible observations'); };
+    const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1', budget,
+      selection: { ...selection, workingContextLimit: 3000 }, brief, jev: judge.config })]);
+    await run.session.prompt('Fix the parser.');
+    await run.session.prompt('Continue.');
+    assert.equal(f.requests.length, 2);
+    assert.equal(entries(run.manager, BRIEF_START_ENTRY).length, 0);
+    assert.equal(entries(run.manager, SELECTION_ENTRY).length, 1);
+    assert.equal(judge.requests.length, 0);
+    assert.deepEqual(run.errors, []);
+  } finally { await f.close(); await judge.close(); }
+});
+
+for (const state of ['unknown-cost', 'unmatched-start', 'hard-overflow'] as const) {
+  test(`${state} still stops a turn with no brief demand`, async () => {
+    const f = await createPiFixture(), judge = await createJevFixture();
+    try {
+      const manager = SessionManager.inMemory(f.directory);
+      if (state !== 'hard-overflow') {
+        manager.appendCustomEntry(BRIEF_START_ENTRY, { updateId: 'pending' });
+        if (state === 'unknown-cost') manager.appendCustomEntry(BRIEF_RESULT_ENTRY,
+          { updateId: 'pending', outcome: 'error', pricedCostUsd: null });
+      }
+      const brief = scriptedBrief(f.model);
+      brief.complete = async () => { assert.fail('No brief demand'); };
+      const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1',
+        budget: state === 'hard-overflow' ? { ...budget, contextLimit: 1000 } : budget,
+        selection, brief, jev: judge.config })], manager);
+      await run.session.prompt('Continue.');
+      assert.equal(f.requests.length, 0);
+      assert.equal(judge.requests.length, 0);
+      assert.equal(entries(manager, STOP_ENTRY).length, 1);
+      assert.equal(entries(manager, BRIEF_SOURCE_ENTRY).length, 0);
+      assert.deepEqual(run.errors, []);
+    } finally { await f.close(); await judge.close(); }
+  });
+}
+
 test('incomplete brief makes one bounded update, preserves evidence and events, then restores without rereading', async () => {
   const f = await createPiFixture(), judge = await createJevFixture();
   try {
