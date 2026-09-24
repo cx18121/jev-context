@@ -25,6 +25,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
   const toolResponses: Array<Array<{ id: string; name: string; arguments: Record<string, unknown> }>> = [];
   let overflow = false;
   let inputTokens = 80;
+  let responseText = 'fixture response';
   const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
@@ -44,7 +45,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
         index, id: call.id, type: 'function',
         function: { name: call.name, arguments: JSON.stringify(call.arguments) },
       })),
-    } : { role: 'assistant', content: 'fixture response' };
+    } : { role: 'assistant', content: responseText };
     for (const chunk of [
       { choices: [{ index: 0, delta, finish_reason: null }] },
       { choices: [{ index: 0, delta: {}, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: inputTokens, completion_tokens: 4, total_tokens: inputTokens + 4, prompt_tokens_details: { cached_tokens: Math.min(20, inputTokens) } } },
@@ -83,6 +84,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
     directory, requests, model,
     overflow() { overflow = true; },
     reportInputTokens(value: number) { inputTokens = value; },
+    respondWithText(text: string) { responseText = text; },
     respondWithTools(calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>) {
       toolResponses.push(calls);
     },
