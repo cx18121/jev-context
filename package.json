@@ -5,7 +5,7 @@
   "type": "module",
   "engines": { "node": ">=22.19.0" },
   "scripts": {
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "eval:retrieval": "node --import tsx eval/retrieval.ts",
     "eval:contextbench": "node --import tsx eval/contextbench-fixture.ts",
