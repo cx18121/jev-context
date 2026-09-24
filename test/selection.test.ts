@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { measureRequest } from '../src/budget.ts';
+import { createUsageAnchor, measureWorkingContext } from '../src/working-context.ts';
 import { commitSelection, buildView, readHistory, SELECTION_ENTRY } from '../src/history.ts';
 import { prepareJevRequest } from '../src/judge-state.ts';
 import { providerText } from '../src/provider-view.ts';
@@ -27,10 +28,14 @@ function fixture() {
   const original = manager.buildSessionContext().messages;
   const history = readHistory(manager.getBranch(), original);
   const view = buildView(original, history, history.retiredIds);
-  const payload = { messages: view.filter((message) => message.role === 'toolResult').map((message) =>
-    ({ role: 'tool', tool_call_id: message.toolCallId, content: providerText(message) })), max_tokens: 100 };
+  const payload = { messages: view.filter((message) => message.role === 'toolResult').flatMap((message) =>
+    [{ role: 'assistant', content: 'Read file.' }, { role: 'tool', tool_call_id: message.toolCallId, content: providerText(message) }]), max_tokens: 100 };
   const size = Buffer.byteLength(JSON.stringify(payload)) + 100;
-  return { manager, a: a!, b: b!, original, history, view, payload, size,
+  const anchor = createUsageAnchor({ ...payload, messages: payload.messages.slice(0, -2) }, model,
+    { ...assistant([]).usage, input: 1000, output: 10, totalTokens: 1010 }, 'previous')!;
+  const measured = measureWorkingContext(payload, model, measureRequest(payload, model, { contextLimit: 100_000, marginTokens: 0 }), 100_000, anchor);
+  const workingSize = measured.inputEstimate! + measured.outputReserve;
+  return { manager, a: a!, b: b!, original, history, view, payload, size, anchor, workingSize,
     plan(contextLimit = 100_000) {
       const budget = { contextLimit, marginTokens: 0 };
       return { budget, plan: prepareSelection(payload, view, history, model, budget, [a!]) };
@@ -56,7 +61,7 @@ test('restoration judges and renders historical original text, not stubs; unchan
   const native = f.manager.buildSessionProjection().messages;
   readHistory(f.manager.getBranch(), native);
   const rendered = native.filter((message) => message.role === 'toolResult').map(providerText);
-  assert.deepEqual((selected.payload as typeof f.payload).messages.map((message) => message.content), rendered);
+  assert.deepEqual((selected.payload as typeof f.payload).messages.filter((message) => message.role === 'tool').map((message) => message.content), rendered);
 });
 
 test('a same-size set swap restores first and retires only low-rated visible evidence needed for room', () => {
@@ -85,9 +90,9 @@ test('threshold gap preserves uncertain archive and visible evidence; cannot-fit
 test('archive candidates must map to the existing unique stub at the provider boundary', () => {
   for (const kind of ['changed', 'missing', 'duplicate']) {
     const f = fixture();
-    if (kind === 'changed') f.payload.messages[0]!.content = 'wrong stub';
-    if (kind === 'missing') f.payload.messages[0]!.tool_call_id = 'normalized';
-    if (kind === 'duplicate') f.payload.messages.push({ ...f.payload.messages[0]! });
+    if (kind === 'changed') f.payload.messages[1]!.content = 'wrong stub';
+    if (kind === 'missing') f.payload.messages[1]!.tool_call_id = 'normalized';
+    if (kind === 'duplicate') f.payload.messages.push({ ...f.payload.messages[1]! });
     assert.throws(() => f.plan(), /unique provider tool result|differs from the selected view/);
   }
 });
@@ -136,11 +141,11 @@ test('invalid limits, overlapping thresholds, archive identities and partial sco
 test('soft pressure builds candidates before the hard limit, with an inclusive target boundary', () => {
   const f = fixture();
   const budget = { contextLimit: 100_000, marginTokens: 0 };
-  const prepare = (workingContextLimit: number) => prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit });
-  const exact = prepare(f.size);
+  const prepare = (workingContextLimit: number) => prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit, anchor: f.anchor });
+  const exact = prepare(f.workingSize);
   assert.equal(exact.workingBefore.fits, true);
   assert.equal(exact.candidates.length, 0);
-  const plan = prepare(f.size - 1);
+  const plan = prepare(f.workingSize - 1);
   assert.equal(plan.before.fits, true);
   assert.equal(plan.workingBefore.fits, false);
   assert.deepEqual(plan.candidates.map((item) => item.evidence.id), [f.b]);
@@ -155,7 +160,7 @@ test('soft pressure builds candidates before the hard limit, with an inclusive t
 test('a missed soft target neither retires relevant evidence nor becomes a hard-budget failure', () => {
   const f = fixture();
   const budget = { contextLimit: 100_000, marginTokens: 0 };
-  const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit: 1 });
+  const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit: 1, anchor: f.anchor });
   for (const score of [0.1, 0.2, 0.9]) {
     const selected = applySelection(plan, { [f.b]: score }, 0.2, 0.8, model, budget);
     assert.equal(selected.workingBudget.fits, false);
@@ -168,7 +173,7 @@ test('a missed soft target neither retires relevant evidence nor becomes a hard-
 test('restorations consume the soft allowance but are never re-retired to satisfy it', () => {
   const f = fixture();
   const budget = { contextLimit: 100_000, marginTokens: 0 };
-  const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [f.a], { workingContextLimit: f.size });
+  const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [f.a], { workingContextLimit: f.workingSize, anchor: f.anchor });
   for (const score of [0.1, 0.9]) {
     const selected = applySelection(plan, { [f.a]: 0.9, [f.b]: score }, 0.2, 0.8, model, budget);
     assert.deepEqual(selected.restoredIds, [f.a]);
@@ -182,7 +187,7 @@ test('without a fresh event soft pressure waits, while hard pressure still selec
   const f = fixture();
   for (const contextLimit of [100_000, f.size - 1]) {
     const budget = { contextLimit, marginTokens: 0 };
-    const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit: 1, reconsider: false });
+    const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [], { workingContextLimit: 1, reconsider: false, anchor: f.anchor });
     assert.equal(plan.candidates.length, contextLimit === 100_000 ? 0 : 1);
     const selected = applySelection(plan, contextLimit === 100_000 ? {} : { [f.b]: 0.1 }, 0.2, 0.8, model, budget);
     assert.equal(selected.budget.fits, true);

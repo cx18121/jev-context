@@ -50,22 +50,25 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
     });
     const factories = (m: SessionManager) => [createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config })];
     const { session, errors } = await f.session(factories, manager);
+    f.reportInputTokens(8000);
+    await session.prompt('Establish usage.');
+    assert.equal(judge.requests.length, 0);
     await session.prompt('Continue with environment setup.');
-    assert.equal(f.requests.length, 1, JSON.stringify(records(manager, STOP_ENTRY)));
+    assert.equal(f.requests.length, 2, JSON.stringify(records(manager, STOP_ENTRY)));
     assert.equal(judge.requests.length, 1);
-    assert.match(String(output(f.requests[0]!, 'a').output), /retired observation/);
-    assert.match(String(output(f.requests[0]!, 'b').output), /Old environment evidence/);
+    assert.match(String(output(f.requests[1]!, 'a').output), /retired observation/);
+    assert.match(String(output(f.requests[1]!, 'b').output), /Old environment evidence/);
     const originalWireItems = stableItems(f.requests[0]!);
     assert.deepEqual(originalWireItems.filter((item) => item.type === 'reasoning'), ['a', 'b', 'new'].map((id) => ({ ...seedReasoning, id: `rs_${id}` })));
     assert.deepEqual(originalWireItems.filter((item) => item.type === 'function_call').map((item) => [item.call_id, item.id]),
       [['a', 'fc_a'], ['b', 'fc_b'], ['new', 'fc_new']]);
     assert.equal(f.requests[0]!.reasoning && (f.requests[0]!.reasoning as { effort: string }).effort, 'medium');
     assert.equal('max_output_tokens' in f.requests[0]!, false);
-    const usage = records<UsageRecord>(manager, USAGE_ENTRY)[0]!;
+    const usage = records<UsageRecord>(manager, USAGE_ENTRY)[1]!;
     assert.equal(usage.budget?.outputReserveSource, 'configured-headroom');
     assert.equal(usage.budget?.outputReserve, 1024);
     assert.equal(usage.usageAvailable, true);
-    assert.equal(usage.usage.input, 60);
+    assert.equal(usage.usage.input, 7980);
     assert.equal(usage.usage.cacheRead, 20);
     assert.equal(usage.usage.output, 4);
     assert.equal(records<{ stateProviderApi: string }>(manager, JUDGE_START_ENTRY)[0]!.stateProviderApi, f.model.api);
@@ -76,11 +79,11 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
 
     restore = true;
     await session.prompt('Return to the API contract evidence.');
-    assert.equal(f.requests.length, 2, JSON.stringify(records(manager, STOP_ENTRY)));
-    assert.match(String(output(f.requests[1]!, 'a').output), /restored historical observation/);
-    assert.match(String(output(f.requests[1]!, 'a').output), /API contract evidence/);
-    assert.match(String(output(f.requests[1]!, 'b').output), /retired observation/);
-    assert.deepEqual(stableItems(f.requests[1]!).slice(0, originalWireItems.length), originalWireItems);
+    assert.equal(f.requests.length, 3, JSON.stringify(records(manager, STOP_ENTRY)));
+    assert.match(String(output(f.requests[2]!, 'a').output), /restored historical observation/);
+    assert.match(String(output(f.requests[2]!, 'a').output), /API contract evidence/);
+    assert.match(String(output(f.requests[2]!, 'b').output), /retired observation/);
+    assert.deepEqual(stableItems(f.requests[2]!).slice(0, originalWireItems.length), originalWireItems);
     assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'message').slice(0, originals.length), originals);
     assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionContext().messages).retiredIds, [b]);
     assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 3);
@@ -92,9 +95,9 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
     const resumed = await f.session(factories, reopened);
     const judgedBefore = judge.requests.length;
     await resumed.session.agent.continue();
-    assert.equal(f.requests.length, 3, JSON.stringify(records(reopened, STOP_ENTRY)));
+    assert.equal(f.requests.length, 4, JSON.stringify(records(reopened, STOP_ENTRY)));
     assert.equal(judge.requests.length, judgedBefore, 'unchanged branch is not rejudged');
-    assert.deepEqual(f.requests[2]!.input.slice(0, f.requests[1]!.input.length), f.requests[1]!.input);
+    assert.deepEqual(f.requests[3]!.input.slice(0, f.requests[2]!.input.length), f.requests[2]!.input);
     assert.deepEqual(resumed.errors, []);
   } finally { await judge.close(); await f.close(); }
 });
@@ -118,21 +121,23 @@ test('Codex two-read regression bounds judge context and defers an accounted fai
         (pi) => { pi.on('before_provider_request', (event) => { originalPayload = structuredClone(event.payload); }); },
         createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config }),
       ], manager);
+      f.reportInputTokens(8000);
+      await run.session.prompt('Establish usage.');
       await run.session.prompt('Continue.');
-      assert.equal(f.requests.length, 1, JSON.stringify(records(manager, STOP_ENTRY)));
+      assert.equal(f.requests.length, 2, JSON.stringify(records(manager, STOP_ENTRY)));
       assert.equal(judge.requests.length, 1);
       assert.deepEqual(Object.keys(judge.requests[0]!.questions), [ids[0]]);
       assert.deepEqual(records<{ omittedObservations: Array<{ evidenceId: string }> }>(manager, JUDGE_START_ENTRY)[0]!
         .omittedObservations.map((item) => item.evidenceId), [ids[1]]);
-      assert.deepEqual(stableItems(f.requests[0]!), stableItems(originalPayload as CodexRequest));
-      assert.equal(output(f.requests[0]!, 'tests').output, 't'.repeat(11413));
+      assert.deepEqual(stableItems(f.requests[1]!), stableItems(originalPayload as CodexRequest));
+      assert.equal(output(f.requests[1]!, 'tests').output, 't'.repeat(11413));
       if (failedJudge) {
-        assert.deepEqual(f.requests[0], originalPayload);
+        assert.deepEqual(f.requests[1], originalPayload);
         assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 0);
         const checkpoint = records<{ reconsideration: { deferral: { reason: string } } }>(manager, SELECTION_ENTRY)[0]!;
         assert.equal(checkpoint.reconsideration.deferral.reason, 'accounted-judge-failure');
       } else {
-        assert.match(String(output(f.requests[0]!, 'source').output), /retired observation/);
+        assert.match(String(output(f.requests[1]!, 'source').output), /retired observation/);
         assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 1);
       }
       assert.equal(records(manager, STOP_ENTRY).length, 0);

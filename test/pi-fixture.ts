@@ -24,6 +24,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
   const requests: FixtureRequest[] = [];
   const toolResponses: Array<Array<{ id: string; name: string; arguments: Record<string, unknown> }>> = [];
   let overflow = false;
+  let inputTokens = 80;
   const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
@@ -46,7 +47,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
     } : { role: 'assistant', content: 'fixture response' };
     for (const chunk of [
       { choices: [{ index: 0, delta, finish_reason: null }] },
-      { choices: [{ index: 0, delta: {}, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 80, completion_tokens: 4, total_tokens: 84, prompt_tokens_details: { cached_tokens: 20 } } },
+      { choices: [{ index: 0, delta: {}, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: inputTokens, completion_tokens: 4, total_tokens: inputTokens + 4, prompt_tokens_details: { cached_tokens: Math.min(20, inputTokens) } } },
     ]) {
       response.write(`data: ${JSON.stringify({ id: 'fixture', object: 'chat.completion.chunk', created: 0, model: 'fixture', ...chunk })}\n\n`);
     }
@@ -81,6 +82,7 @@ export async function createPiFixture(onRequest?: (request: FixtureRequest) => v
   return {
     directory, requests, model,
     overflow() { overflow = true; },
+    reportInputTokens(value: number) { inputTokens = value; },
     respondWithTools(calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>) {
       toolResponses.push(calls);
     },

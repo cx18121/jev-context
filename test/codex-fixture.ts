@@ -20,6 +20,7 @@ export interface CodexRequest {
 export async function createCodexFixture() {
   const directory = await mkdtemp(join(tmpdir(), 'jev-codex-'));
   const requests: CodexRequest[] = [];
+  let inputTokens = 80;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -34,7 +35,7 @@ export async function createCodexFixture() {
     ];
     const events: unknown[] = output.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item }));
     events.push({ type: 'response.completed', response: { id: `response_${id}`, status: 'completed', output,
-      usage: { input_tokens: 80, output_tokens: 4, total_tokens: 84, input_tokens_details: { cached_tokens: 20 } } } });
+      usage: { input_tokens: inputTokens, output_tokens: 4, total_tokens: inputTokens + 4, input_tokens_details: { cached_tokens: Math.min(20, inputTokens) } } } });
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''));
   });
@@ -60,6 +61,7 @@ export async function createCodexFixture() {
   const sessions: AgentSession[] = [];
   return {
     directory, requests, model,
+    reportInputTokens(value: number) { inputTokens = value; },
     async session(factories: (manager: SessionManager) => ExtensionFactory[] = () => [],
       manager = SessionManager.create(directory, join(directory, 'sessions')), tools: string[] = []) {
       const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: false },

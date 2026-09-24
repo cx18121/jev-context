@@ -5,13 +5,14 @@ import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { measureRequest, type RequestBudget } from './budget.ts';
 import { buildView, retirementText, SELECTION_ENTRY, validateSelection, type HistoryView } from './history.ts';
 import { mapProviderEvidence, providerText, replaceProviderText } from './provider-view.ts';
-import { applyRetirement, type RetirementCandidate, type RetirementPlan } from './retirement.ts';
+import type { RetirementCandidate, RetirementPlan } from './retirement.ts';
+import { measureWorkingContext, type UsageAnchor, type WorkingMeasurement } from './working-context.ts';
 
 export const SELECTION_POLICY = 'jev-select-v1';
 export interface SelectionConfig {
   archiveLimit: number;
   restoreAtOrAbove: number;
-  /** Soft whole-request target, including output reserve and margin. Omission uses the hard limit. */
+  /** Estimated token target, including output reserve and margin. Omission uses only the hard guard. */
   workingContextLimit?: number;
 }
 
@@ -41,27 +42,31 @@ export function selectionEvents(branch: SessionEntry[], history: HistoryView) {
 interface SelectionCandidate extends RetirementCandidate { archived: boolean }
 export interface SelectionPlan extends RetirementPlan {
   candidates: SelectionCandidate[];
-  workingBefore: RetirementPlan['before'];
+  workingBefore: RetirementPlan['before'] | WorkingMeasurement;
+  anchor?: UsageAnchor;
+  workingContextLimit?: number;
 }
 
 /** One batch includes the archive shortlist and all shrinkable visible evidence that could make room. */
 export function prepareSelection(
   payload: unknown, messages: AgentMessage[], history: HistoryView,
   model: Model<Api>, budget: RequestBudget, archiveIds: string[],
-  options: Pick<SelectionConfig, 'workingContextLimit'> & { reconsider?: boolean } = {},
+  options: Pick<SelectionConfig, 'workingContextLimit'> & { reconsider?: boolean; anchor?: UsageAnchor } = {},
 ): SelectionPlan {
   const before = measureRequest(payload, model, budget);
   const workingContextLimit = options.workingContextLimit ?? before.contextLimit;
   if (!Number.isSafeInteger(workingContextLimit) || workingContextLimit <= 0 || workingContextLimit > before.contextLimit) {
     throw new Error('workingContextLimit must be a positive safe integer at most the effective hard context limit');
   }
-  const workingBefore = measureRequest(payload, model, { ...budget, contextLimit: workingContextLimit });
+  const workingBefore = options.workingContextLimit === undefined ? before
+    : measureWorkingContext(payload, model, before, workingContextLimit, options.anchor);
+  const working = { workingBefore, anchor: options.anchor, workingContextLimit: options.workingContextLimit };
   const retired = new Set(validateSelection(history, history.retiredIds));
   if (new Set(archiveIds).size !== archiveIds.length || archiveIds.some((id) => !retired.has(id))) {
     throw new Error('Invalid archive candidate selection');
   }
-  if (before.fits && !archiveIds.length && (workingBefore.fits || options.reconsider === false)) {
-    return { payload, history, before, workingBefore, candidates: [] };
+  if (before.fits && !archiveIds.length && (workingBefore.fits !== false || options.reconsider === false)) {
+    return { payload, history, before, ...working, candidates: [] };
   }
   const archive = new Set(archiveIds);
   const eligible = history.evidence.filter((item) => !item.protectedReason && (!retired.has(item.id) || archive.has(item.id)));
@@ -76,7 +81,7 @@ export function prepareSelection(
     const saving = Buffer.byteLength(JSON.stringify(text)) - Buffer.byteLength(JSON.stringify(stub));
     if (archived || saving > 0) candidates.push({ ...mapped, text, stub, saving, archived });
   }
-  return { payload, history, before, workingBefore, candidates };
+  return { payload, history, before, ...working, candidates };
 }
 
 /** Restore selected archive evidence, then retire low-rated visible evidence toward the soft target. */
@@ -97,12 +102,20 @@ export function applySelection(
   for (const item of plan.candidates) {
     if (restored.has(item.evidence.id)) replaceProviderText(payload, model.api, item.messageIndex, item.text);
   }
-  const visible = plan.candidates.filter((item) => !item.archived);
-  const order = visible.filter((item) => relevance[item.evidence.id]! < retireBelow)
-    .sort((a, b) => relevance[a.evidence.id]! - relevance[b.evidence.id]!).map((item) => item.evidence.id);
-  const workingBudget = { ...budget, contextLimit: plan.workingBefore.contextLimit };
-  const result = applyRetirement({ payload, history: { ...plan.history, retiredIds },
-    before: measureRequest(payload, model, workingBudget), candidates: visible }, order, model, workingBudget);
-  return { ...result, restoredIds, workingBudget: result.budget,
-    budget: measureRequest(result.payload, model, budget) };
+  const order = plan.candidates.filter((item) => !item.archived && relevance[item.evidence.id]! < retireBelow)
+    .sort((a, b) => relevance[a.evidence.id]! - relevance[b.evidence.id]!);
+  const measure = () => {
+    const hard = measureRequest(payload, model, budget);
+    const working = plan.workingContextLimit === undefined ? hard
+      : measureWorkingContext(payload, model, hard, plan.workingContextLimit, plan.anchor);
+    return { budget: hard, workingBudget: working };
+  };
+  let measured = measure();
+  for (const item of order) {
+    if (measured.budget.fits && measured.workingBudget.fits !== false) break;
+    replaceProviderText(payload, model.api, item.messageIndex, item.stub);
+    retiredIds.push(item.evidence.id);
+    measured = measure();
+  }
+  return { payload, retiredIds: validateSelection(plan.history, retiredIds), restoredIds, ...measured };
 }

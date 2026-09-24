@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
+import type { Api, AssistantMessage, Model, Usage } from '@earendil-works/pi-ai';
 import type { ExtensionContext, ExtensionFactory, SessionManager } from '@earendil-works/pi-coding-agent';
 import { measureRequest, type BudgetMeasurement, type RequestBudget } from './budget.ts';
 import { applyRetirement, prepareRetirement } from './retirement.ts';
@@ -8,6 +8,7 @@ import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
 import { JevInputLimitError, prepareJevRequest } from './judge-state.ts';
 import { mapProviderEvidence } from './provider-view.ts';
+import { createUsageAnchor, type UsageAnchor, type WorkingMeasurement } from './working-context.ts';
 import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
 import {
   buildView, commitSelection, readHistory, validateSelection,
@@ -40,7 +41,7 @@ export interface UsageRecord {
   cancelled: boolean;
   responseReceived: boolean;
   budget: BudgetMeasurement | null;
-  workingContext?: BudgetMeasurement & { configuredLimit: number | null };
+  workingContext?: (BudgetMeasurement | WorkingMeasurement) & { configuredLimit: number | null };
   usageSource: 'pi-normalized';
   usageAvailable: boolean;
   usage: Usage;
@@ -67,6 +68,7 @@ interface Attempt {
   };
   budget?: BudgetMeasurement;
   workingContext?: UsageRecord['workingContext'];
+  sent?: { payload: unknown; model: Model<Api> };
   stopped: boolean;
   cancelled: boolean;
   responseReceived: boolean;
@@ -85,6 +87,8 @@ export function createContextExtension(manager: SessionManager, options: Context
   return (pi) => {
     let attempt: Attempt | undefined;
     let writeFailed = false;
+    let anchor: { usage: UsageAnchor; sessionId: string; leafId: string | null; assistantHash: string } | undefined;
+    const assistantHash = (message: AssistantMessage) => createHash('sha256').update(JSON.stringify(message)).digest('hex');
 
     function sameBranch(ctx: ExtensionContext, current: Attempt): boolean {
       return ctx.sessionManager === manager && manager.getSessionId() === current.sessionId &&
@@ -122,7 +126,15 @@ export function createContextExtension(manager: SessionManager, options: Context
         if (writeFailed) throw new Error('Session writes failed; reopen a complete session branch before continuing');
         if (!sameBranch(ctx, current)) throw new Error('Context extension is bound to a different session manager');
         signal.throwIfAborted();
-        const history = readHistory(structuredClone(ctx.sessionManager.getBranch()), event.messages);
+        const branch = ctx.sessionManager.getBranch();
+        if (anchor) {
+          const index = branch.findIndex((entry) => entry.id === anchor!.leafId);
+          const responses = branch.slice(index + 1).flatMap((entry) =>
+            entry.type === 'message' && entry.message.role === 'assistant' ? [entry.message] : []);
+          if (anchor.sessionId !== current.sessionId || index < 0 || responses.length !== 1 ||
+              assistantHash(responses[0]!) !== anchor.assistantHash) anchor = undefined;
+        }
+        const history = readHistory(structuredClone(branch), event.messages);
         const proposed = options.policy === 'scripted-v1' && options.select
           ? await options.select(structuredClone(history), signal) : null;
         signal.throwIfAborted();
@@ -170,10 +182,11 @@ export function createContextExtension(manager: SessionManager, options: Context
             const due = history.retiredIds.length > 0 && fresh;
             const lookup = due ? retrieveArchive(history, originals, options.selection.archiveLimit) : null;
             selectionPlan = prepareSelection(payload, messages, history, ctx.model, options.budget,
-              lookup?.candidates.map((item) => item.evidence.id) ?? [], { ...options.selection, reconsider: fresh });
+              lookup?.candidates.map((item) => item.evidence.id) ?? [],
+              { ...options.selection, reconsider: fresh, anchor: anchor?.usage });
             current.workingContext = { ...selectionPlan.workingBefore,
               configuredLimit: options.selection.workingContextLimit ?? null };
-            checkpoint = due || !selectionPlan.before.fits || (fresh && !selectionPlan.workingBefore.fits);
+            checkpoint = due || !selectionPlan.before.fits || (fresh && selectionPlan.workingBefore.fits === false);
             if (checkpoint) current.reconsideration = {
               events, restoreAtOrAbove: options.selection.restoreAtOrAbove,
               workingContext: current.workingContext,
@@ -257,6 +270,9 @@ export function createContextExtension(manager: SessionManager, options: Context
           }
           current.leafId = manager.getLeafId();
         }
+        if (options.policy === 'jev-select-v1' && options.selection.workingContextLimit !== undefined) {
+          current.sent = { payload: structuredClone(payload), model: ctx.model };
+        }
         return payload;
       } catch (error) {
         stop(ctx, current, error instanceof Error ? error.message : String(error), error instanceof JevError ? 'judge' : undefined);
@@ -271,6 +287,7 @@ export function createContextExtension(manager: SessionManager, options: Context
       if (event.message.role !== 'assistant' || !attempt) return;
       const current = attempt;
       attempt = undefined;
+      anchor = undefined;
       if (writeFailed || !sameBranch(ctx, current)) return;
       const message = event.message;
       pi.appendEntry(USAGE_ENTRY, {
@@ -288,6 +305,12 @@ export function createContextExtension(manager: SessionManager, options: Context
         }).some((value) => value > 0),
         usage: structuredClone(message.usage),
       } satisfies UsageRecord);
+      if (current.sent && !current.stopped && !ctx.signal?.aborted && current.responseReceived &&
+          (message.stopReason === 'stop' || message.stopReason === 'toolUse') &&
+          message.provider === current.sent.model.provider && message.model === current.sent.model.id && message.api === current.sent.model.api) {
+        const usage = createUsageAnchor(current.sent.payload, current.sent.model, message.usage, current.id);
+        if (usage) anchor = { usage, sessionId: current.sessionId, leafId: manager.getLeafId(), assistantHash: assistantHash(message) };
+      }
     });
   };
 }

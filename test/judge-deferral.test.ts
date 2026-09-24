@@ -52,7 +52,7 @@ test('deferrals keep the wire view, record unjudged archive candidates, and cons
       else assert.ok(records<{ pricedCostUsd: number | null }>(manager, JUDGE_RESULT_ENTRY)[0]!.pricedCostUsd !== null);
       const usage = records<UsageRecord>(manager, USAGE_ENTRY)[0]!;
       assert.equal(usage.budget!.fits, true);
-      assert.equal(usage.workingContext!.fits, false);
+      assert.equal(usage.workingContext!.fits, null);
       assert.equal(usage.managerStopped, false);
       assert.equal(records(manager, STOP_ENTRY).length, 0);
 

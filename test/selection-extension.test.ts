@@ -252,25 +252,23 @@ test('soft pressure retires before the hard limit and later restores against the
   const fixture = await createPiFixture();
   const judge = await createJevFixture();
   try {
-    const controlManager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
-    seed(controlManager, 100, false);
-    const control = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget: roomy })], controlManager);
-    await control.session.prompt('Continue.');
-    const before = measureRequest(fixture.requests[0]!, fixture.model, roomy);
-    assert.equal(before.fits, true);
-    const workingContextLimit = before.inputEstimate + before.outputReserve + before.marginTokens - 1;
+    fixture.reportInputTokens(3000);
+    const workingContextLimit = 5000;
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const ids = seed(manager, 100, false);
     const run = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit },
     })], manager);
+    await run.session.prompt('Establish usage.');
+    assert.equal(judge.requests.length, 0);
+    assert.equal(data<UsageRecord>(manager, USAGE_ENTRY)[0]!.workingContext!.fits, null);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
     assert.equal(fixture.requests.length, 2);
     assert.match(tool(fixture.requests[1]!, 'a'), /retired observation/);
     assert.equal(tool(fixture.requests[1]!, 'b'), tool(fixture.requests[0]!, 'b'));
     assert.equal(tool(fixture.requests[1]!, 'latest'), 'Environment ready.');
-    assert.equal(data<UsageRecord>(manager, USAGE_ENTRY)[0]!.workingContext!.fits, true);
+    assert.equal(data<UsageRecord>(manager, USAGE_ENTRY)[1]!.workingContext!.fits, true);
     judge.respond((request) => {
       const body = jevResponse(request);
       body.answers[ids.a]!.noul = 0.9;
@@ -281,14 +279,11 @@ test('soft pressure retires before the hard limit and later restores against the
     assert.match(tool(fixture.requests[2]!, 'a'), /restored historical observation/);
     assert.match(tool(fixture.requests[2]!, 'b'), /retired observation/);
     for (const [i, record] of data<UsageRecord>(manager, USAGE_ENTRY).entries()) {
-      const wire = fixture.requests[i + 1]!;
-      assert.deepEqual(record.budget, measureRequest(wire, fixture.model, roomy));
-      assert.deepEqual(record.workingContext, {
-        ...measureRequest(wire, fixture.model, { ...roomy, contextLimit: workingContextLimit }),
-        configuredLimit: workingContextLimit,
-      });
+      assert.deepEqual(record.budget, measureRequest(fixture.requests[i]!, fixture.model, roomy));
       assert.equal(record.budget!.fits, true);
-      assert.equal(record.workingContext!.fits, true);
+      assert.equal(record.workingContext!.method, 'provider-usage-plus-delta-v1');
+      assert.equal(record.workingContext!.configuredLimit, workingContextLimit);
+      assert.equal(record.workingContext!.fits, i === 0 ? null : true);
     }
     const checkpoints = data<{ reconsideration: { workingContext: UsageRecord['workingContext'] } }>(manager, SELECTION_ENTRY);
     assert.equal(checkpoints.length, 2);
@@ -309,12 +304,13 @@ test('a soft miss dispatches relevant evidence, checkpoints the event, and does 
       policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     });
     const run = await fixture.session((manager) => [factory(manager)], manager);
+    await run.session.prompt('Establish usage.');
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
-    assert.equal(fixture.requests.length, 1);
-    assert.ok(!tool(fixture.requests[0]!, 'a').includes('retired observation'));
+    assert.equal(fixture.requests.length, 2);
+    assert.ok(!tool(fixture.requests[1]!, 'a').includes('retired observation'));
     assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 0);
-    const usage = data<UsageRecord>(manager, USAGE_ENTRY)[0]!;
+    const usage = data<UsageRecord>(manager, USAGE_ENTRY)[1]!;
     assert.equal(usage.budget!.fits, true);
     assert.equal(usage.workingContext!.fits, false);
     assert.equal(usage.managerStopped, false);
@@ -325,8 +321,8 @@ test('a soft miss dispatches relevant evidence, checkpoints the event, and does 
     await resumed.session.agent.continue();
     assert.equal(judge.requests.length, 1);
     assert.equal(data(resumed.manager, SELECTION_ENTRY).length, 1);
-    assert.deepEqual(fixture.requests[1]!.messages, fixture.requests[0]!.messages);
-    assert.equal(data<UsageRecord>(resumed.manager, USAGE_ENTRY)[0]!.workingContext!.fits, false);
+    assert.deepEqual(fixture.requests[2]!.messages, fixture.requests[1]!.messages);
+    assert.equal(data<UsageRecord>(resumed.manager, USAGE_ENTRY).at(-1)!.workingContext!.fits, null);
     await resumed.session.prompt('Check the API contract again.');
     assert.equal(judge.requests.length, 2);
     assert.equal(data(resumed.manager, SELECTION_ENTRY).length, 2);
@@ -343,10 +339,12 @@ test('a protected-only soft miss dispatches without calling the judge', async ()
       policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     })]);
     await run.session.prompt('Keep this user instruction.');
+    assert.equal(data(run.manager, SELECTION_ENTRY).length, 0);
+    await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 0);
-    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests.length, 2);
     assert.equal(data(run.manager, SELECTION_ENTRY).length, 1);
-    const usage = data<UsageRecord>(run.manager, USAGE_ENTRY)[0]!;
+    const usage = data<UsageRecord>(run.manager, USAGE_ENTRY)[1]!;
     assert.equal(usage.budget!.fits, true);
     assert.equal(usage.workingContext!.fits, false);
     assert.deepEqual(run.errors, []);
@@ -371,7 +369,7 @@ test('hard overflow with a soft target still stops before dispatch or native edi
     const stopped = data<{ kind: string; budget: { fits: boolean }; workingContext: { fits: boolean } }>(manager, STOP_ENTRY)[0]!;
     assert.equal(stopped.kind, 'budget');
     assert.equal(stopped.budget.fits, false);
-    assert.equal(stopped.workingContext.fits, false);
+    assert.equal(stopped.workingContext.fits, null);
     assert.deepEqual(run.errors, []);
   } finally { await judge.close(); await fixture.close(); }
 });
@@ -386,15 +384,79 @@ test('judge failure under soft pressure stops a hard-fitting request without con
     const run = await fixture.session((manager) => [createContextExtension(manager, {
       policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     })], manager);
+    await run.session.prompt('Establish usage.');
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
-    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.requests.length, 1);
     assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 0);
     assert.equal(data(manager, SELECTION_ENTRY).length, 0);
     const stopped = data<{ kind: string; budget: { fits: boolean }; workingContext: { fits: boolean } }>(manager, STOP_ENTRY)[0]!;
     assert.equal(stopped.kind, 'judge');
     assert.equal(stopped.budget.fits, true);
     assert.equal(stopped.workingContext.fits, false);
+    assert.deepEqual(run.errors, []);
+  } finally { await judge.close(); await fixture.close(); }
+});
+
+test('unknown usage and changed request settings recover only after a new successful response', async () => {
+  const fixture = await createPiFixture();
+  const judge = await createJevFixture();
+  try {
+    const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
+    seed(manager, 100, false);
+    judge.respond((request) => ({ body: jevResponse(request, 0.9) }));
+    let instruction = 'First settings';
+    const run = await fixture.session((manager) => [
+      (pi) => { pi.on('before_provider_request', (event) => {
+        const payload = structuredClone(event.payload) as FixtureRequest;
+        payload.messages.unshift({ role: 'system', content: instruction });
+        return payload;
+      }); },
+      createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config,
+        selection: { ...selection, workingContextLimit: 1 } }),
+    ], manager);
+    fixture.reportInputTokens(0);
+    await run.session.prompt('No usable input usage.');
+    fixture.reportInputTokens(80);
+    await run.session.prompt('Establish valid usage.');
+    assert.equal(judge.requests.length, 0);
+    instruction = 'Changed settings';
+    await run.session.prompt('Changed request cannot reuse the anchor.');
+    assert.equal(judge.requests.length, 0);
+    await run.session.prompt('Stable settings reuse the new anchor.');
+    assert.equal(judge.requests.length, 1);
+    const working = data<UsageRecord>(manager, USAGE_ENTRY).map((entry) => entry.workingContext!);
+    assert.deepEqual(working.map((entry) => entry.fits), [null, null, null, false]);
+    assert.deepEqual(working.map((entry) => 'unknownReason' in entry ? entry.unknownReason : undefined),
+      ['no-anchor', 'no-anchor', 'request-changed', undefined]);
+    assert.equal(fixture.requests.length, 4);
+    assert.deepEqual(run.errors, []);
+  } finally { await judge.close(); await fixture.close(); }
+});
+
+test('soft pressure reuses a tool-call response anchor but not an abandoned branch response', async () => {
+  const fixture = await createPiFixture();
+  const judge = await createJevFixture();
+  try {
+    await writeFile(join(fixture.directory, 'fresh.txt'), 'New observation');
+    const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
+    seed(manager, 100, false);
+    const previousLeaf = manager.getLeafId()!;
+    judge.respond((request) => ({ body: jevResponse(request, 0.9) }));
+    fixture.respondWithTools([{ id: 'fresh', name: 'read', arguments: { path: 'fresh.txt' } }]);
+    const run = await fixture.session((manager) => [createContextExtension(manager, {
+      policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
+    })], manager, ['read']);
+    await run.session.prompt('Read fresh.txt.');
+    assert.equal(fixture.requests.length, 2);
+    assert.equal(judge.requests.length, 1);
+    assert.deepEqual(data<UsageRecord>(manager, USAGE_ENTRY).map((entry) => entry.workingContext!.fits), [null, false]);
+    assert.equal(tool(fixture.requests[1]!, 'fresh'), 'New observation');
+    await run.session.navigateTree(previousLeaf, { summarize: false });
+    await run.session.prompt('Continue on the other branch.');
+    assert.equal(judge.requests.length, 1);
+    assert.equal(data<UsageRecord>(manager, USAGE_ENTRY).at(-1)!.workingContext!.fits, null);
+    assert.equal(fixture.requests.length, 3);
     assert.deepEqual(run.errors, []);
   } finally { await judge.close(); await fixture.close(); }
 });
