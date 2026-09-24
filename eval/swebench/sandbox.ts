@@ -68,6 +68,7 @@ export class Sandbox {
   readonly name = `jev-eval-${randomUUID()}`;
   dead = false;
   configuration: unknown;
+  private imageHead?: string;
   constructor(readonly task: AgentTask) { parseTask(task); }
 
   async start() {
@@ -80,11 +81,13 @@ export class Sandbox {
       const state = JSON.parse(inspected.text)[0];
       assert.equal(state.HostConfig.NetworkMode, 'none');
       assert.ok(!state.Mounts.some((m: { Type: string }) => m.Type === 'bind' || m.Type === 'volume'));
-      const base = await this.command(`git diff --exit-code ${this.task.baseCommit} -- && test -z "$(git status --porcelain)" && git rev-parse HEAD`, { seconds: 10 });
-      assert.equal(base.code, 0, 'Task tree differs from the clean pinned base');
+      // Native grading applies the agent patch to this prepared image, not a reset dataset tree.
+      const base = await this.command(`git cat-file -e ${this.task.baseCommit}^{commit} && git diff --quiet HEAD -- && test -z "$(git status --porcelain)" && git rev-parse HEAD`, { seconds: 10 });
+      assert.equal(base.code, 0, 'Task image must have a clean checkout and contain the source base');
       assert.match(base.text.trim(), /^[a-f0-9]{40}$/);
+      this.imageHead = base.text.trim();
       this.configuration = { image: state.Image, network: 'none', mounts: state.Mounts,
-        imageHead: base.text.trim(), verifiedTreeBase: this.task.baseCommit };
+        imageHead: this.imageHead, verifiedTreeBase: this.imageHead, sourceBase: this.task.baseCommit };
       return this;
     } catch (error) { await this.close(); throw error; }
   }
@@ -130,7 +133,8 @@ export class Sandbox {
   }
 
   async patch() {
-    const result = await this.command(`git add -N -- . && git diff --binary ${this.task.baseCommit} --`, { seconds: 20, maxBytes: 500000 });
+    assert.ok(this.imageHead, 'Task image has not been verified');
+    const result = await this.command(`git add -N -- . && git diff --binary ${this.imageHead} --`, { seconds: 20, maxBytes: 500000 });
     assert.equal(result.code, 0, 'Patch capture failed');
     return result.text;
   }

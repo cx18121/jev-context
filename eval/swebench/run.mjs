@@ -180,7 +180,7 @@ async function arm(phase, instruction) {
       fixturePaths = Object.entries(sourceSnapshot.files).filter(([path, text]) => /^[a-zA-Z0-9_./-]+\.py$/.test(path)
         && Buffer.byteLength(text) >= 2000).slice(0, 2).map(([path]) => path);
       if (!live) assert.equal(fixturePaths.length, 2, 'Local fixture needs two source files');
-    } // Every arm independently verifies a clean tree against the same immutable base.
+    } // Each arm verifies the same prepared image; coverage retains the immutable dataset base.
     const bash = createBashToolDefinition('/testbed', { exposeSessionEnvironment: false, operations: {
       async exec(command, _cwd, options) {
         // SDK context cwd is the isolated host session directory. Never execute there.
