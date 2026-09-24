@@ -1,3 +1,4 @@
+import { scriptedBrief } from './brief-fixture.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
@@ -36,7 +37,7 @@ test('deferrals keep the wire view, record unjudged archive candidates, and cons
       const old = seed(manager, failure === 'pair-cap');
       judge.respond((request) => ({ status: failure === 'http_error' ? 529 : 200,
         body: { ...jevResponse(request), answers: {} } }));
-      const factories = (m: SessionManager) => [createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config })];
+      const factories = (m: SessionManager) => [createContextExtension(m, { policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget, selection, jev: judge.config })];
       const run = await f.session(factories, manager);
       const original = structuredClone(manager.buildSessionProjection().messages);
       await run.session.prompt('Continue.');
@@ -104,7 +105,7 @@ test('mixed-size hard-pressure decisions change only judged wire evidence, or st
         return { body };
       });
       const run = await f.session((m) => [createContextExtension(m, {
-        policy: 'jev-select-v1', budget: { contextLimit: 31_000, marginTokens: 0 },
+        policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget: { contextLimit: 31_000, marginTokens: 0 },
         selection: { archiveLimit: 2, restoreAtOrAbove: 0.8 }, jev: judge.config,
       })], manager);
       await run.session.prompt('Continue.');
@@ -136,7 +137,7 @@ test('an accounted failed judge under hard pressure still stops without checkpoi
     seed(manager);
     judge.respond((request) => ({ body: { ...jevResponse(request), answers: {} } }));
     const run = await f.session((m) => [createContextExtension(m, {
-      policy: 'jev-select-v1', budget: { ...budget, contextLimit: 1000 }, selection, jev: judge.config,
+      policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget: { ...budget, contextLimit: 1000 }, selection, jev: judge.config,
     })], manager);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
@@ -158,7 +159,7 @@ test('a deferral checkpoint write failure stops dispatch and poisons the writer'
       if (kind === SELECTION_ENTRY) throw new Error('Injected checkpoint failure');
       return append(kind, value);
     };
-    const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config })], manager);
+    const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget, selection, jev: judge.config })], manager);
     await run.session.prompt('Continue.');
     await run.session.prompt('Try again.');
     assert.equal(f.requests.length, 0);

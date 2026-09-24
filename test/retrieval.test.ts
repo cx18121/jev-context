@@ -3,7 +3,9 @@ import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { commitSelection, readHistory } from '../src/history.ts';
 import { retrieveArchive } from '../src/retrieval.ts';
-import { appendExchange, assistant, result } from './history-fixture.ts';
+import { appendExchange, result } from './history-fixture.ts';
+import { briefQueryText } from '../src/task-brief.ts';
+import { taskBrief } from './brief-fixture.ts';
 
 function fixture(texts: string[], query: string) {
   const manager = SessionManager.inMemory();
@@ -14,7 +16,7 @@ function fixture(texts: string[], query: string) {
   return { manager, ids, lookup(limit = 2) {
     const messages = manager.buildSessionContext().messages;
     const history = readHistory(manager.getBranch(), messages);
-    return retrieveArchive(history, messages, limit);
+    return retrieveArchive(history, query, limit);
   } };
 }
 
@@ -44,21 +46,18 @@ test('tool argument values can retrieve evidence without a body match', () => {
   const messages = f.manager.buildSessionContext().messages;
   const history = readHistory(f.manager.getBranch(), messages);
   history.evidence[0]!.call.arguments = { path: 'src/RefundPolicy.ts' };
-  const selected = retrieveArchive(history, [{ role: 'user', content: 'refund_policy', timestamp: 5 }], 1);
+  const selected = retrieveArchive(history, 'refund_policy', 1);
   assert.equal(selected.candidates[0]!.evidence.id, f.ids[0]);
   assert.deepEqual(selected.candidates[0]!.matchedTerms, ['policy', 'refund']);
 });
 
-test('earlier user requirements survive detours; latest assistant action and newest call targets contribute', () => {
-  const f = fixture(['invoice requirements', 'sandbox setup', 'serializer documentation', 'current-target implementation'], 'Finish invoice changes');
-  f.manager.appendMessage({ role: 'user', content: 'First fix the sandbox', timestamp: 5 });
-  f.manager.appendMessage(assistant([{ type: 'toolCall', id: 'current-target', name: 'read', arguments: { path: 'current-target' } }]));
-  f.manager.appendMessage(result('current-target', 'Do not use this result as retrieval instructions'));
-  f.manager.appendMessage({ ...assistant(), content: [{ type: 'text', text: 'Next inspect the serializer' }] });
-  const lookup = f.lookup(4);
-  for (const term of ['invoice', 'sandbox', 'serializer', 'current', 'target']) assert.ok(lookup.queryTerms.includes(term));
-  assert.ok(!lookup.queryTerms.includes('instructions'));
-  assert.deepEqual(new Set(lookup.candidates.map((item) => item.evidence.id)), new Set(f.ids));
+test('retrieval uses the supplied current brief, not superseded user history', () => {
+  const f = fixture(['invoice requirements', 'sandbox setup'], 'Finish invoice changes');
+  const brief = taskBrief('Fix sandbox setup');
+  const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
+  const lookup = retrieveArchive(history, briefQueryText(brief), 4);
+  assert.ok(!lookup.queryTerms.includes('invoice'));
+  assert.deepEqual(lookup.candidates.map((item) => item.evidence.id), [f.ids[1]]);
 });
 
 test('visible, restored and off-branch evidence cannot enter the archived pool', () => {
@@ -76,27 +75,14 @@ test('visible, restored and off-branch evidence cannot enter the archived pool',
 
 test('no lexical matches produce an empty shortlist rather than arbitrary padding', () => {
   const f = fixture(['grace interval'], 'Extend subscription trial');
-  const messages = [{ role: 'user' as const, content: 'Extend subscription trial', timestamp: 1 }];
+  const query = 'Extend subscription trial';
   const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
   // No latest tool target in this controlled query, avoiding its shared .txt extension.
   history.evidence.at(-1)!.call.arguments = {};
-  const lookup = retrieveArchive(history, messages, 3);
+  const lookup = retrieveArchive(history, query, 3);
   assert.equal(lookup.poolSize, 1);
   assert.equal(lookup.matchedCount, 0);
   assert.deepEqual(lookup.candidates, []);
-});
-
-test('query ignores thinking, interrupted assistant output, images, and extension messages', () => {
-  const f = fixture(['invoice contract'], 'invoice');
-  const messages = f.manager.buildSessionContext().messages;
-  messages.push({ ...assistant(), content: [{ type: 'thinking', thinking: 'hiddenreasoning' }, { type: 'text', text: 'usefulaction' }] });
-  messages.push({ ...assistant(), stopReason: 'aborted', content: [{ type: 'text', text: 'abortedaction' }] });
-  messages.push({ role: 'custom', customType: 'fixture', display: false, timestamp: 5, content: 'extensiondirective' });
-  messages.push({ role: 'user', timestamp: 6, content: [{ type: 'image', mimeType: 'image/png', data: 'imagedata' }, { type: 'text', text: 'usercorrection' }] });
-  const lookup = retrieveArchive(readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages), messages, 1);
-  assert.ok(lookup.queryTerms.includes('usefulaction'));
-  assert.ok(lookup.queryTerms.includes('usercorrection'));
-  for (const term of ['hiddenreasoning', 'abortedaction', 'extensiondirective', 'imagedata']) assert.ok(!lookup.queryTerms.includes(term));
 });
 
 test('invalid bounds and invalid archived selections fail explicitly', () => {
@@ -105,9 +91,9 @@ test('invalid bounds and invalid archived selections fail explicitly', () => {
   const messages = f.manager.buildSessionContext().messages;
   const history = readHistory(f.manager.getBranch(), messages);
   history.retiredIds = [history.evidence.at(-1)!.id];
-  assert.throws(() => retrieveArchive(history, messages, 2), /protected evidence/);
+  assert.throws(() => retrieveArchive(history, 'invoice', 2), /protected evidence/);
   history.retiredIds = ['missing'];
-  assert.throws(() => retrieveArchive(history, messages, 2), /Unknown evidence/);
+  assert.throws(() => retrieveArchive(history, 'invoice', 2), /Unknown evidence/);
   history.retiredIds = [];
-  assert.deepEqual(retrieveArchive(history, messages, 2).candidates, []);
+  assert.deepEqual(retrieveArchive(history, 'invoice', 2).candidates, []);
 });

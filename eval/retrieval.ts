@@ -46,14 +46,16 @@ export function prepareRetrievalFixture(scenario: RetrievalScenario) {
 }
 
 export function evaluateRetrieval(scenario: RetrievalScenario) {
-  const { history, messages, labels } = prepareRetrievalFixture(scenario);
+  const { history, labels } = prepareRetrievalFixture(scenario);
+  // Authored query diagnostic, not a test of automatic brief quality.
+  const query = [...scenario.users, scenario.action, scenario.latestPath].join('\n');
   const known = new Set(labels.values());
   if (new Set(scenario.relevant).size !== scenario.relevant.length || scenario.relevant.some((id) => !known.has(id))) {
     throw new Error('Relevant labels must be unique members of the archive');
   }
-  const shortlist = retrieveArchive(history, messages, scenario.limit);
+  const shortlist = retrieveArchive(history, query, scenario.limit);
   // The uncapped lexical ranking diagnoses cutoff misses, not semantic relevance.
-  const uncapped = retrieveArchive(history, messages, Math.max(1, history.retiredIds.length));
+  const uncapped = retrieveArchive(history, query, Math.max(1, history.retiredIds.length));
   const selected = new Set(shortlist.candidates.map((item) => labels.get(item.evidence.id)!));
   const matches = new Set(uncapped.candidates.map((item) => labels.get(item.evidence.id)!));
   const relevant = new Set(scenario.relevant);

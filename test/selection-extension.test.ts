@@ -1,3 +1,4 @@
+import { scriptedBrief } from './brief-fixture.ts';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -41,7 +42,7 @@ test('new user work restores original history before pressure, persists pure res
       body.answers[ids.a]!.noul = 0.8;
       return { body };
     });
-    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection })], manager);
     const events: string[] = [];
     run.session.subscribe((event) => events.push(event.type));
     await run.session.prompt('Return to the API contract.');
@@ -59,7 +60,7 @@ test('new user work restores original history before pressure, persists pure res
     assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'message').slice(0, originals.length), originals);
     assert.ok(!JSON.stringify(manager.getBranch()).includes(judge.config.apiKey));
     run.session.dispose();
-    const resumed = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], SessionManager.open(manager.getSessionFile()!));
+    const resumed = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection })], SessionManager.open(manager.getSessionFile()!));
     await resumed.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1); // No archived evidence remains.
     assert.deepEqual(fixture.requests[1]!.messages.slice(0, selected.messages.length), selected.messages);
@@ -73,7 +74,7 @@ test('a no-op checkpoint suppresses duplicate judging on an extracted resume wit
   try {
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const ids = seed(manager);
-    const factory = (manager: SessionManager) => createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection });
+    const factory = (manager: SessionManager) => createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection });
     const run = await fixture.session((manager) => [factory(manager)], manager);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
@@ -107,7 +108,7 @@ test('a completed real tool exchange creates another restoration opportunity whi
       return { body };
     });
     fixture.respondWithTools([{ id: 'fresh', name: 'read', arguments: { path: 'fresh.txt' } }]);
-    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager, ['read']);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection })], manager, ['read']);
     await run.session.prompt('Read fresh.txt, then finish the API change.');
     assert.equal(judge.requests.length, 2);
     assert.equal(fixture.requests.length, 2);
@@ -144,7 +145,7 @@ test('an archive hit cannot displace unjudged visible evidence or stop a fitting
       let before: unknown;
       const run = await fixture.session((manager) => [
         (pi) => { pi.on('before_provider_request', (event) => { before = JSON.parse(JSON.stringify(event.payload)); }); },
-        createContextExtension(manager, { policy: 'jev-select-v1', budget, jev: judge.config, selection }),
+        createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget, jev: judge.config, selection }),
       ], manager);
       await run.session.prompt('Continue.');
       const records = data<SelectionRecord>(manager, SELECTION_ENTRY);
@@ -170,7 +171,7 @@ test('oversized archived evidence defers, but unknown judge cost still stops a f
       const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
       seed(manager, oversized ? 2000 : 100);
       judge.respond(() => ({ status: 529, body: { error: 'Unavailable' } }));
-      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection })], manager);
       await run.session.prompt('Continue.');
       assert.equal(data(manager, SELECTION_ENTRY).length, oversized ? 2 : 1);
       if (oversized) {
@@ -197,7 +198,7 @@ test('a zero-match event is checkpointed without a judge call or silent archive 
     manager.appendMessage(assistant([{ type: 'toolCall', id: 'new', name: 'read', arguments: { path: 'workspace' } }]));
     manager.appendMessage(result('new', 'Ready'));
     commitSelection(manager, [old], 'scripted-v1');
-    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection })], manager);
     await run.session.prompt('Continue.');
     assert.equal(judge.requests.length, 0);
     assert.equal(fixture.requests.length, 1);
@@ -221,7 +222,7 @@ test('cancellation and late results after a branch switch cannot partially resto
       const previous = manager.getLeafId()!;
       const entered = Promise.withResolvers<void>();
       judge.respond(async (request) => { entered.resolve(); await release.promise; return { body: jevResponse(request, 0.9) }; });
-      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
+      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection })], manager);
       const pending = run.session.prompt('Return to the API.');
       await entered.promise;
       if (moveBranch) {
@@ -252,7 +253,7 @@ test('soft pressure retires before the hard limit and later restores against the
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     const ids = seed(manager, 100, false);
     const run = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit },
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit },
     })], manager);
     await run.session.prompt('Establish usage.');
     assert.equal(judge.requests.length, 0);
@@ -296,7 +297,7 @@ test('a soft miss dispatches relevant evidence, checkpoints the event, and does 
     seed(manager, 100, false);
     judge.respond((request) => ({ body: jevResponse(request, 0.9) }));
     const factory = (manager: SessionManager) => createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     });
     const run = await fixture.session((manager) => [factory(manager)], manager);
     await run.session.prompt('Establish usage.');
@@ -331,7 +332,7 @@ test('a protected-only soft miss dispatches without calling the judge', async ()
   const judge = await createJevFixture();
   try {
     const run = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     })]);
     await run.session.prompt('Keep this user instruction.');
     assert.equal(data(run.manager, SELECTION_ENTRY).length, 0);
@@ -353,7 +354,7 @@ test('hard overflow with a soft target still stops before dispatch or native edi
     const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     seed(manager, 100, false);
     const run = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: { ...roomy, contextLimit: 1000 }, jev: judge.config,
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: { ...roomy, contextLimit: 1000 }, jev: judge.config,
       selection: { ...selection, workingContextLimit: 1 },
     })], manager);
     await run.session.prompt('Continue.');
@@ -377,7 +378,7 @@ test('judge failure under soft pressure stops a hard-fitting request without con
     seed(manager, 100, false);
     judge.respond(() => ({ status: 529, body: { error: 'Unavailable' } }));
     const run = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     })], manager);
     await run.session.prompt('Establish usage.');
     await run.session.prompt('Continue.');
@@ -407,7 +408,7 @@ test('unknown usage and changed request settings recover only after a new succes
         payload.messages.unshift({ role: 'system', content: instruction });
         return payload;
       }); },
-      createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config,
+      createContextExtension(manager, { policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config,
         selection: { ...selection, workingContextLimit: 1 } }),
     ], manager);
     fixture.reportInputTokens(0);
@@ -440,7 +441,7 @@ test('soft pressure reuses a tool-call response anchor but not an abandoned bran
     judge.respond((request) => ({ body: jevResponse(request, 0.9) }));
     fixture.respondWithTools([{ id: 'fresh', name: 'read', arguments: { path: 'fresh.txt' } }]);
     const run = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: roomy, jev: judge.config, selection: { ...selection, workingContextLimit: 1 },
     })], manager, ['read']);
     await run.session.prompt('Read fresh.txt.');
     assert.equal(fixture.requests.length, 2);
@@ -461,7 +462,7 @@ test('a target above the effective model window stops as invalid before judging 
   const judge = await createJevFixture();
   try {
     const run = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'jev-select-v1', budget: { ...roomy, contextLimit: 100_000 }, jev: judge.config,
+      policy: 'jev-select-v1', brief: scriptedBrief(fixture.model), budget: { ...roomy, contextLimit: 100_000 }, jev: judge.config,
       selection: { ...selection, workingContextLimit: 40_000 },
     })]);
     await run.session.prompt('Continue.');

@@ -58,6 +58,7 @@ export function taskSources(branch: SessionEntry[]): BriefSource[] {
 
 export interface BriefResult {
   outcome: 'ok' | 'invalid' | 'error' | 'cancelled';
+  completionInvoked: boolean;
   usage: Usage | null;
   pricedCostUsd: number | null;
   usageSource: 'pi-normalized';
@@ -81,10 +82,11 @@ export async function updateBrief(plan: BriefUpdatePlan, sources: BriefSource[],
   complete: NonNullable<BriefConfig['complete']>, parentSignal: AbortSignal): Promise<BriefResult> {
   validateBriefConfig(config);
   const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(config.timeoutMs)]);
-  const result: BriefResult = { outcome: 'error', usage: null, pricedCostUsd: null, usageSource: 'pi-normalized' };
+  const result: BriefResult = { outcome: 'error', completionInvoked: false, usage: null, pricedCostUsd: null, usageSource: 'pi-normalized' };
   let onAbort: (() => void) | undefined;
   try {
     signal.throwIfAborted();
+    result.completionInvoked = true;
     const completion = complete(config.model, {
       systemPrompt: BRIEF_INSTRUCTIONS,
       messages: [{ role: 'user', content: JSON.stringify({ previous: plan.previous, sources: plan.sources }), timestamp: 0 }],
@@ -110,6 +112,7 @@ export async function updateBrief(plan: BriefUpdatePlan, sources: BriefSource[],
     result.brief = applyBriefUpdate(plan, JSON.parse(output), sources);
     result.outcome = 'ok';
   } catch (error) {
+    if (!result.completionInvoked) result.pricedCostUsd = 0;
     if (signal.aborted) result.outcome = 'cancelled';
     result.error = error instanceof Error ? error.message : String(error);
   } finally {

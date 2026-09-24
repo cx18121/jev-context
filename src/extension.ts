@@ -7,9 +7,12 @@ import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
 import { planJevSelection, prepareJevRequests, type UnjudgedCandidate } from './judge-state.ts';
-import { mapProviderEvidence } from './provider-view.ts';
+import { mapProviderEvidence, providerInstructions } from './provider-view.ts';
+import { BRIEF_ENTRY, BRIEF_SOURCE_ENTRY, BRIEF_START_ENTRY, BRIEF_RESULT_ENTRY, taskSources,
+  updateBrief, validateBriefConfig, type BriefConfig, type BriefResult } from './brief-session.ts';
+import { BRIEF_INSTRUCTIONS, briefIsCurrent, briefQueryText, planBriefUpdate, validateTaskBrief, type TaskBrief } from './task-brief.ts';
 import { createUsageAnchor, type UsageAnchor, type WorkingMeasurement } from './working-context.ts';
-import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
+import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, validateJevConfig, type JevConfig } from './jev.ts';
 import {
   buildView, commitSelection, readHistory, validateSelection,
   type HistoryView,
@@ -23,7 +26,7 @@ export const JUDGE_RESULT_ENTRY = 'jev-context/judge-result';
 export type ContextOptions = { budget: RequestBudget } & (
   | { policy: 'oldest-first-v1'; select?: never }
   | { policy: 'jev-v1'; jev: JevConfig; select?: never }
-  | { policy: 'jev-select-v1'; jev: JevConfig; selection: SelectionConfig; select?: never }
+  | { policy: 'jev-select-v1'; jev: JevConfig; selection: SelectionConfig; brief: BriefConfig; select?: never }
   | {
     policy: 'scripted-v1';
     /** Integration seam. Omitted or null reuses the recorded view without a fresh decision. */
@@ -52,7 +55,7 @@ interface Attempt {
   sessionId: string;
   leafId: string | null;
   selection?: string[];
-  view?: { history: HistoryView; messages: AgentMessage[]; originals: AgentMessage[] };
+  view?: { history: HistoryView; messages: AgentMessage[] };
   reconsideration?: {
     events: ReturnType<typeof selectionEvents>;
     retrieval: { version: string; limit: number; poolSize: number; matchedCount: number; candidateIds: string[] } | null;
@@ -63,7 +66,7 @@ interface Attempt {
     proposedRetiredIds?: string[];
     workingContext?: UsageRecord['workingContext'];
     deferral?: {
-      reason: 'accounted-judge-failure';
+      reason: 'accounted-judge-failure' | 'task-brief-pending';
       unjudgedCandidateIds: string[];
     };
   };
@@ -84,7 +87,10 @@ export function createContextExtension(manager: SessionManager, options: Context
     throw new Error('Automatic retirement cannot use a scripted selector');
   }
   if (options.policy === 'jev-v1' || options.policy === 'jev-select-v1') validateJevConfig(options.jev);
-  if (options.policy === 'jev-select-v1') validateSelectionConfig(options.selection, options.jev.retireBelow, options.budget);
+  if (options.policy === 'jev-select-v1') {
+    validateSelectionConfig(options.selection, options.jev.retireBelow, options.budget);
+    validateBriefConfig(options.brief);
+  }
   return (pi) => {
     let attempt: Attempt | undefined;
     let writeFailed = false;
@@ -111,6 +117,57 @@ export function createContextExtension(manager: SessionManager, options: Context
         current.leafId = ctx.sessionManager.getLeafId();
       }
       if (!current.cancelled) ctx.ui.notify(`jev-context stopped: ${reason}`, 'error');
+    }
+
+    async function refreshBrief(ctx: ExtensionContext, current: Attempt, payload: unknown, config: BriefConfig): Promise<TaskBrief | null> {
+      const append = (kind: string, data: unknown) => {
+        if (!sameBranch(ctx, current)) throw new Error('Session branch changed during task brief update');
+        try { pi.appendEntry(kind, data); }
+        catch (error) { writeFailed = true; throw error; }
+        current.leafId = manager.getLeafId();
+      };
+      const instructions = JSON.stringify(providerInstructions(payload, ctx.model!.api));
+      const previousInstructions = manager.getBranch().findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_SOURCE_ENTRY);
+      if (previousInstructions?.type !== 'custom' || (previousInstructions.data as { text?: unknown })?.text !== instructions) {
+        append(BRIEF_SOURCE_ENTRY, { version: 1, text: instructions });
+      }
+      const branch = manager.getBranch();
+      const lastStart = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_START_ENTRY);
+      const lastResult = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_RESULT_ENTRY);
+      const recorded = lastResult?.type === 'custom' ? lastResult.data as BriefResult & { updateId: string; inputHash: string } : undefined;
+      if (lastStart?.type === 'custom' && ((lastStart.data as { updateId: string }).updateId !== recorded?.updateId || recorded.pricedCostUsd === null)) {
+        throw new Error('Previous task brief request has unknown cost; further inference is stopped');
+      }
+      const sources = taskSources(branch);
+      const entry = branch.findLast((entry) => entry.type === 'custom' && entry.customType === BRIEF_ENTRY);
+      let previous: TaskBrief | null;
+      let plan;
+      try {
+        previous = entry?.type === 'custom' ? validateTaskBrief(entry.data, sources) : null;
+        plan = planBriefUpdate(sources, previous);
+      } catch {
+        // Invalid persisted state is not authority to retire evidence or to silently restart paid history scanning.
+        return null;
+      }
+      if (!plan) return previous;
+      const inputHash = createHash('sha256').update(JSON.stringify({ instructions: BRIEF_INSTRUCTIONS, plan,
+        model: config.model, maxTokens: config.maxTokens })).digest('hex');
+      if (recorded?.inputHash === inputHash && recorded.outcome !== 'ok' && recorded.completionInvoked !== false) return null;
+      const updateId = randomUUID();
+      append(BRIEF_START_ENTRY, { version: 1, updateId, requestId: current.id, inputHash,
+        provider: config.model.provider, model: config.model.id, timeoutMs: config.timeoutMs, maxTokens: config.maxTokens });
+      const result = await updateBrief(plan, sources, config,
+        config.complete ?? ((model, context, options) => ctx.modelRegistry.streamSimple(model, context, options).result()), ctx.signal!);
+      if (!sameBranch(ctx, current)) throw new Error('Session branch changed during task brief update');
+      append(BRIEF_RESULT_ENTRY, { version: 1, updateId, requestId: current.id, inputHash, ...result });
+      if (result.pricedCostUsd === null) throw new Error(result.error ?? 'Task brief request has unknown cost');
+      ctx.signal!.throwIfAborted();
+      if (result.outcome !== 'ok' || !result.brief) return null;
+      // Check fresh branch sources after the asynchronous request, not just the captured input.
+      const freshSources = taskSources(manager.getBranch());
+      const brief = validateTaskBrief(result.brief, freshSources);
+      append(BRIEF_ENTRY, brief);
+      return briefIsCurrent(brief, freshSources) ? brief : null;
     }
 
     pi.on('session_before_compact', () => ({ cancel: true }));
@@ -146,7 +203,7 @@ export function createContextExtension(manager: SessionManager, options: Context
           current.selection = retiredIds;
         }
         const messages = current.selection ? buildView(event.messages, history, retiredIds) : event.messages;
-        current.view = { history, messages, originals: event.messages };
+        current.view = { history, messages };
         return { messages };
       } catch (error) {
         stop(ctx, current, error instanceof Error ? error.message : String(error));
@@ -174,14 +231,15 @@ export function createContextExtension(manager: SessionManager, options: Context
         }
         if (options.policy !== 'scripted-v1') {
           if (!current.view) throw new Error('Missing context view');
-          const { history, messages, originals } = current.view;
+          const { history, messages } = current.view;
+          const brief = options.policy === 'jev-select-v1' ? await refreshBrief(ctx, current, payload, options.brief) : null;
           let selectionPlan;
           let checkpoint = false;
           if (options.policy === 'jev-select-v1') {
             const events = selectionEvents(ctx.sessionManager.getBranch(), history);
             const fresh = events.userIds.length > 0 || events.exchangeIds.length > 0;
             const due = history.retiredIds.length > 0 && fresh;
-            const lookup = due ? retrieveArchive(history, originals, options.selection.archiveLimit) : null;
+            const lookup = due && brief ? retrieveArchive(history, briefQueryText(brief), options.selection.archiveLimit) : null;
             selectionPlan = prepareSelection(payload, messages, history, ctx.model, options.budget,
               lookup?.candidates.map((item) => item.evidence.id) ?? [],
               { ...options.selection, reconsider: fresh, anchor: anchor?.usage });
@@ -200,9 +258,10 @@ export function createContextExtension(manager: SessionManager, options: Context
           current.budget = plan.before;
           let order = plan.candidates.map((candidate) => candidate.evidence.id);
           let relevance: Record<string, number> = {};
-          let deferral: NonNullable<Attempt['reconsideration']>['deferral'];
-          if ((options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
-            const preparedSelection = selectionPlan ? planJevSelection(plan, messages, ctx.model.api) : undefined;
+          let deferral: NonNullable<Attempt['reconsideration']>['deferral'] = options.policy === 'jev-select-v1' && !brief
+            ? { reason: 'task-brief-pending', unjudgedCandidateIds: order } : undefined;
+          if (!deferral && (options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
+            const preparedSelection = selectionPlan ? planJevSelection(plan, messages, ctx.model.api, brief!) : undefined;
             const batches = preparedSelection?.batches ?? prepareJevRequests(plan, messages, ctx.model.api);
             if (current.reconsideration && preparedSelection) current.reconsideration.unjudged = preparedSelection.unjudged;
             const deadline = performance.now() + options.jev.timeoutMs;
@@ -213,7 +272,7 @@ export function createContextExtension(manager: SessionManager, options: Context
               const batchIdentity = { batchIndex, batchCount: batches.length };
               pi.appendEntry(JUDGE_START_ENTRY, {
                 version: 1, requestId: current.id, sourceLeafId: current.leafId,
-                policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION, stateProviderApi: ctx.model.api,
+                policy: options.policy, model: JEV_MODEL, promptVersion: prepared.promptVersion, stateProviderApi: ctx.model.api,
                 endpoint: options.jev.endpoint ?? JEV_ENDPOINT,
                 ...batchIdentity, candidateIds: Object.keys(prepared.request.questions),
                 retireBelow: options.jev.retireBelow, timeoutMs,
@@ -260,7 +319,8 @@ export function createContextExtension(manager: SessionManager, options: Context
               ...(deferral && { deferral }),
             };
           }
-          if (checkpoint || JSON.stringify([...proposal.retiredIds].sort()) !== JSON.stringify([...history.retiredIds].sort())) {
+          if (deferral?.reason !== 'task-brief-pending' &&
+              (checkpoint || JSON.stringify([...proposal.retiredIds].sort()) !== JSON.stringify([...history.retiredIds].sort()))) {
             current.selection = proposal.retiredIds;
           }
         } else {

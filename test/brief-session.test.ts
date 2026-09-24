@@ -100,7 +100,9 @@ test('cancellation retains known spend but never installs an update', async () =
   let calls = 0;
   const cancelled = await updateBrief(planBriefUpdate(sources, null)!, sources, config, async () => { calls++; return response(); }, controller.signal);
   assert.equal(calls, 0);
-  assert.equal(cancelled.pricedCostUsd, null);
+  assert.equal(cancelled.outcome, 'cancelled');
+  assert.equal(cancelled.completionInvoked, false);
+  assert.equal(cancelled.pricedCostUsd, 0);
 });
 
 test('request timeout and transport failures remain unknown-cost failures', async () => {
@@ -108,6 +110,7 @@ test('request timeout and transport failures remain unknown-cost failures', asyn
   const failed = await updateBrief(plan, sources, config, async () => { throw new Error('transport failed'); }, new AbortController().signal);
   assert.equal(failed.outcome, 'error');
   assert.equal(failed.pricedCostUsd, null);
+  assert.equal(failed.completionInvoked, true);
   const timed = await updateBrief(plan, sources, { ...config, timeoutMs: 5 }, async (_m, _c, options) => {
     await new Promise((resolve) => setTimeout(resolve, 15));
     options.signal!.throwIfAborted();

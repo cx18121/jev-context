@@ -2,6 +2,8 @@
 
 `run.mjs` runs one task twice through Pi 0.87.1 and Sol medium. Control uses the logging/budget extension without selection. Selector uses `jev-select-v1`. Both have the same prompt, tools, model, and fresh offline container. Native patch grading and ContextBench source coverage use those same trajectories.
 
+**Live mode is paused.** Selection now requires a separately configured task-brief model. `--live` rejects before reading credentials, creating output, or starting Docker until that model and guarded transport have an approved budget. Local modes use the shared scripted brief fixture, record its starts/results separately, and make no updater inference. Those synthetic usage costs are labeled `briefScriptedCostUsd`, not included in coding or Jev spend. Existing live artifacts still describe their recorded code and protocol, not the current brief implementation.
+
 ## Inputs and commands
 
 The runner accepts only an agent-facing JSON object with exactly `instanceId`, `repo`, `baseCommit`, `image`, and `problemStatement`. The image must be a pulled `swebench/sweb.eval.x86_64.*@sha256:...` digest. Gold patches, tests, and annotations are rejected as extra fields. Start Docker first.
@@ -10,13 +12,10 @@ The runner accepts only an agent-facing JSON object with exactly `instanceId`, `
 # Scripted inference, actual Docker tools and Pi SDK. No model calls or credentials.
 node --import tsx eval/swebench/run.mjs --local agent-task.json results/NEW_LOCAL_RUN
 
-# Real inference. Uses stored Codex credentials and TYPESAFE_API_KEY from the root .env.
-node --import tsx eval/swebench/run.mjs --live agent-task.json results/NEW_LIVE_RUN
-
 # Evaluator-only inputs enter after the run.
-node --import tsx eval/swebench/score.ts results/NEW_LIVE_RUN evaluator-reference.json
+node --import tsx eval/swebench/score.ts results/NEW_LOCAL_RUN evaluator-reference.json
 PYTHON_DOTENV_DISABLED=1 uv run --no-project --python 3.13 --with swebench==5.0.2 \
-  python -I eval/swebench/grade.py results/NEW_LIVE_RUN evaluator-native.json
+  python -I eval/swebench/grade.py results/NEW_LOCAL_RUN evaluator-native.json
 ```
 
 Output directories are exclusive. Never overwrite an interrupted paid run to retry it. Artifacts include opaque reasoning and source and belong under ignored `results/`, not Git. Neither command installs this extension in your daily Pi setup.

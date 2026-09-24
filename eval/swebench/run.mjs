@@ -15,13 +15,16 @@ import { SELECTION_ENTRY } from '../../src/history.ts';
 import { JEV_ENDPOINT, JEV_MODEL } from '../../src/jev.ts';
 import { Sandbox, parseTask, sandboxReadTool } from './sandbox.ts';
 import { captureRequest } from '../contextbench.ts';
+import { BRIEF_START_ENTRY, BRIEF_RESULT_ENTRY } from '../../src/brief-session.ts';
+import { scriptedBrief } from '../../test/brief-fixture.ts';
 
 process.umask(0o077);
 const [mode, taskFile, output, ...extra] = process.argv.slice(2);
 assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--live'].includes(mode)
   && taskFile && output && extra.length === 0, 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY');
-const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const live = mode === '--live';
+assert.ok(!live, 'Live selector runs require an explicitly approved brief model and separately guarded brief transport. Local modes remain available.');
+const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const root = new URL('./', import.meta.url);
 const run = pathToFileURL(resolve(output) + '/');
 await mkdir(run, { mode: 0o700 });
@@ -119,7 +122,9 @@ async function setup() {
         }
         assert.equal(req.url, '/codex/responses');
         const output = fixtureOutput(fixtureTurn);
-        const usage = { input_tokens: 30000, output_tokens: 200, total_tokens: 30200, input_tokens_details: { cached_tokens: mode === '--local-invalid-usage' ? 30001 : 1024 } };
+        // Pressure first retires evidence; the third response establishes restoration headroom.
+        const inputTokens = fixtureTurn < 3 ? 30000 : 10000;
+        const usage = { input_tokens: inputTokens, output_tokens: 200, total_tokens: inputTokens + 200, input_tokens_details: { cached_tokens: mode === '--local-invalid-usage' ? inputTokens + 1 : 1024 } };
         const events = output.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item }));
         events.push({ type: fixtureTurn % 2 ? 'response.done' : 'response.completed', response: { id: randomUUID(), status: 'completed', output, usage } });
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -193,7 +198,9 @@ async function arm(phase, instruction) {
     } });
     bash.executionMode = 'sequential';
     const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
-    const policy = phase === 'control' ? { policy: 'scripted-v1', budget } : { policy: 'jev-select-v1', budget, selection, jev: { ...judgePolicy, apiKey: jevKey, endpoint: judgeEndpoint } };
+    // Local updater responses are scripted, never an implicit extra call to the coding model.
+    const brief = scriptedBrief(model);
+    const policy = phase === 'control' ? { policy: 'scripted-v1', budget } : { policy: 'jev-select-v1', budget, selection, brief, jev: { ...judgePolicy, apiKey: jevKey, endpoint: judgeEndpoint } };
     const loader = new DefaultResourceLoader({ cwd, agentDir: `${cwd}/agent`, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       extensionFactories: [createContextExtension(manager, policy)], systemPromptOverride: () => systemPrompt, appendSystemPromptOverride: () => [] });
@@ -273,6 +280,11 @@ async function arm(phase, instruction) {
     outcome.stops = records(STOP_ENTRY); outcome.judgeStarts = records(JUDGE_START_ENTRY); outcome.judgeResults = records(JUDGE_RESULT_ENTRY);
     outcome.selections = records(SELECTION_ENTRY); outcome.nativeEdits = entries.filter((e) => e.type === 'context_edit');
     outcome.extensionUsage = records(USAGE_ENTRY);
+    outcome.briefStarts = records(BRIEF_START_ENTRY); outcome.briefResults = records(BRIEF_RESULT_ENTRY);
+    outcome.briefAccountingComplete = outcome.briefStarts.length === outcome.briefResults.length
+      && outcome.briefResults.every((r) => r.pricedCostUsd !== null);
+    outcome.briefScriptedCostUsd = outcome.briefResults.reduce((n, r) => n + (r.pricedCostUsd ?? 0), 0);
+    if (!outcome.briefAccountingComplete) report.accountingComplete = false;
     const last = session?.messages.findLast((m) => m.role === 'assistant');
     outcome.completed = !outcome.failure && !fatal && !outcome.stops.length && last?.stopReason === 'stop';
     outcome.failure ??= fatal ?? outcome.stops.at(-1)?.reason ?? (outcome.completed ? null : 'No final response');
@@ -299,12 +311,15 @@ try {
   const sourceHashes = {};
   for (const file of ['run.mjs', 'sandbox.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, root)));
   for (const file of await readdir(new URL('../../src/', root))) if (file.endsWith('.ts')) sourceHashes[`src/${file}`] = sha(await readFile(new URL(`../../src/${file}`, root)));
-  sourceHashes['package-lock.json'] = sha(await readFile(new URL('../../package-lock.json', root)));
+  for (const file of ['test/brief-fixture.ts', 'test/history-fixture.ts', 'package-lock.json']) {
+    sourceHashes[file] = sha(await readFile(new URL(`../../${file}`, root)));
+  }
   const instruction = task.problemStatement;
   await save('agent-task.json', task);
   await save('manifest.json', { mode, instanceId: task.instanceId, base: task.baseCommit, image: task.image, piVersion: pkg.version,
     model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: ['control', 'selector'], bounds, budget, selection, judgePolicy,
     taskSha256: sha(JSON.stringify(task)), instructionSha256: sha(instruction), sourceHashes, prices, systemPrompt,
+    briefMode: 'local-scripted-no-inference',
     limits: ['One development task, one fresh trajectory per arm. Not a causal quality/cost estimate.',
       'Control uses the same budget/logging extension in no-selection mode; neither arm uses normal Pi resources or compaction.',
       'Fixed order, different session/cache keys do not guarantee independent provider caches. Natural trajectories differ.',

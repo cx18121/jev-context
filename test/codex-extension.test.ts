@@ -1,3 +1,4 @@
+import { scriptedBrief } from './brief-fixture.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Type, type Model, type Api } from '@earendil-works/pi-ai';
@@ -48,7 +49,7 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
       for (const id of Object.keys(body.answers)) body.answers[id]!.noul = restore ? (id === a ? 0.99 : 0.1) : (id === a ? 0.1 : 0.9);
       return { body };
     });
-    const factories = (m: SessionManager) => [createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config })];
+    const factories = (m: SessionManager) => [createContextExtension(m, { policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget, selection, jev: judge.config })];
     const { session, errors } = await f.session(factories, manager);
     f.reportInputTokens(8000);
     await session.prompt('Establish usage.');
@@ -121,7 +122,7 @@ test('Codex two-read regression bounds judge context and defers an accounted fai
       let originalPayload: unknown;
       const run = await f.session((m) => [
         (pi) => { pi.on('before_provider_request', (event) => { originalPayload = structuredClone(event.payload); }); },
-        createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config }),
+        createContextExtension(m, { policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget, selection, jev: judge.config }),
       ], manager);
       f.reportInputTokens(8000);
       await run.session.prompt('Establish usage.');

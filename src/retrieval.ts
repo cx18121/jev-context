@@ -1,4 +1,3 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { validateSelection, type Evidence, type HistoryView } from './history.ts';
 
 export const RETRIEVAL_VERSION = 'token-overlap-v1';
@@ -24,32 +23,11 @@ function argumentText(value: unknown): string {
   return '';
 }
 
-function queryText(history: HistoryView, messages: AgentMessage[]): string {
-  const parts: string[] = [];
-  // Keep earlier requirements in retrieval scope. Jev, not lexical matching, resolves supersession.
-  for (const message of messages) {
-    if (message.role === 'user') parts.push(typeof message.content === 'string' ? message.content :
-      message.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n'));
-  }
-  const latest = messages.findLast((message) => message.role === 'assistant' &&
-    message.stopReason !== 'error' && message.stopReason !== 'aborted');
-  if (latest?.role === 'assistant') {
-    for (const block of latest.content) {
-      if (block.type === 'text') parts.push(block.text);
-      else if (block.type === 'toolCall') parts.push(argumentText(block.arguments));
-    }
-  }
-  for (const item of history.evidence) {
-    if (item.protectedReason === 'newest-exchange') parts.push(argumentText(item.call.arguments));
-  }
-  return parts.join('\n');
-}
-
 /** Shortlist archived evidence only. This neither judges relevance nor changes the working view. */
-export function retrieveArchive(history: HistoryView, messages: AgentMessage[], maxCandidates: number): ArchiveLookup {
+export function retrieveArchive(history: HistoryView, query: string, maxCandidates: number): ArchiveLookup {
   if (!Number.isSafeInteger(maxCandidates) || maxCandidates < 1) throw new Error('maxCandidates must be a positive safe integer');
   const retired = new Set(validateSelection(history, history.retiredIds));
-  const queryTerms = [...terms(queryText(history, messages))].sort();
+  const queryTerms = [...terms(query)].sort();
   const pool = history.evidence.filter((item) => retired.has(item.id)).map((evidence) => ({
     evidence,
     terms: terms([evidence.call.name, argumentText(evidence.call.arguments),

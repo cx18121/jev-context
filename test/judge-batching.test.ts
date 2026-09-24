@@ -1,3 +1,4 @@
+import { scriptedBrief } from './brief-fixture.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
@@ -53,7 +54,7 @@ for (const mode of ['success', 'accounted-failure', 'unknown-cost', 'cancel', 'b
       const run = await f.session((m) => [
         (pi) => { pi.on('before_provider_request', (e) => { before = structuredClone(e.payload) as CodexRequest; }); },
         createContextExtension(m, {
-          policy: 'jev-select-v1', budget: { contextLimit: 32768, marginTokens: 256, outputReserveTokens: 1024 },
+          policy: 'jev-select-v1', brief: scriptedBrief(f.model), budget: { contextLimit: 32768, marginTokens: 256, outputReserveTokens: 1024 },
           selection: { archiveLimit: 2, restoreAtOrAbove: 0.8, workingContextLimit: 8000 },
           jev: { ...judge.config, timeoutMs: mode === 'deadline' ? 500 : judge.config.timeoutMs },
         }),

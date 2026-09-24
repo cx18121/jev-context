@@ -1,3 +1,4 @@
+import { taskBrief } from './brief-fixture.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
@@ -59,6 +60,33 @@ test('judge state preserves middle-turn corrections, conversation authority, and
   assert.match(question.instructions.question, /not just the latest action/);
   assert.deepEqual(Object.keys(request.questions), [id]);
   assert.ok(requestBytes <= JEV_REQUEST_BYTES && maxPairBytes <= JEV_PAIR_BYTES);
+});
+
+test('selection uses a bounded brief and recent window regardless of old conversation growth', () => {
+  const manager = SessionManager.inMemory();
+  appendExchange(manager, [result('old', 'Exact historical compatibility evidence. '.repeat(100))]);
+  appendExchange(manager, [result('new', 'Current environment detour.')]);
+  const fixture = prepared(manager);
+  const brief = taskBrief('Keep API compatibility and do not edit schema.sql.');
+  const oversized = { role: 'user' as const, content: 'OLD_HISTORY '.repeat(10_000), timestamp: 1 };
+  const recent = { role: 'user' as const, content: 'Fix the test environment first.', timestamp: 2 };
+  const make = (count: number) => planJevSelection(fixture.plan,
+    [...Array.from({ length: count }, () => oversized), ...fixture.messages, recent], model.api, brief);
+  const small = make(1), large = make(20);
+  assert.deepEqual(large, small);
+  assert.equal(large.unjudged.length, 0);
+  for (const batch of large.batches) {
+    const state = JSON.stringify(batch.request.state);
+    assert.match(state, /Keep API compatibility and do not edit schema.sql/);
+    assert.match(state, /Fix the test environment first/);
+    assert.doesNotMatch(state, /OLD_HISTORY|System-level constraints/);
+    assert.equal(batch.promptVersion, 'source-linked-task-v1');
+    assertSizes(batch);
+  }
+  // A newest entry that cannot fit is unavailable as a whole, not silently clipped.
+  const blockedWindow = planJevSelection(fixture.plan, [...fixture.messages, oversized], model.api, brief);
+  assert.deepEqual(blockedWindow.batches[0]!.request.state, { taskBrief: { items: brief.items, activity: brief.activity }, conversation: [] });
+  assert.match(JSON.stringify(blockedWindow.batches[0]!.request.state), /Keep API compatibility/);
 });
 
 test('unpaired calls retain their whole arguments in judge state', () => {
@@ -173,7 +201,7 @@ test('selection skips oversized whole candidates and keeps their state explicitl
     if (archived) fixture.plan.candidates.unshift({ ...fixture.plan.candidates[0]!,
       evidence: fixture.plan.history.evidence[0]!, text: 'x'.repeat(35_000) });
     const before = structuredClone(fixture);
-    const selected = planJevSelection(fixture.plan, fixture.messages, model.api);
+    const selected = planJevSelection(fixture.plan, fixture.messages, model.api, taskBrief());
     assert.deepEqual(selected.unjudged.map(({ evidenceId, reason }) => ({ evidenceId, reason })),
       [{ evidenceId: large, reason: 'pair-cap' }]);
     assert.ok(selected.unjudged[0]!.pairBytes > JEV_PAIR_BYTES);
@@ -192,7 +220,7 @@ test('selection caps calls but still admits smaller later candidates into remain
   const [small] = appendExchange(manager, [result('small', 'small'.repeat(100))]);
   appendExchange(manager, [result('latest', 'protected')]);
   const fixture = prepared(manager);
-  const selected = planJevSelection(fixture.plan, fixture.messages, model.api);
+  const selected = planJevSelection(fixture.plan, fixture.messages, model.api, taskBrief());
   assert.equal(selected.batches.length, JEV_MAX_BATCHES);
   assert.ok(selected.unjudged.length > 0);
   assert.ok(selected.unjudged.every((item) => item.reason === 'decision-cap'));
@@ -210,7 +238,7 @@ test('zero fitting candidates returns measurements, not an empty HTTP request', 
   const [large] = appendExchange(manager, [result('large', 'x'.repeat(35_000))]);
   appendExchange(manager, [result('latest', 'protected')]);
   const fixture = prepared(manager);
-  const selected = planJevSelection(fixture.plan, fixture.messages, model.api);
+  const selected = planJevSelection(fixture.plan, fixture.messages, model.api, taskBrief());
   assert.deepEqual(selected.batches, []);
   assert.equal(selected.unjudged[0]!.evidenceId, large);
   assert.ok(selected.unjudged[0]!.stateBytes > 0);
