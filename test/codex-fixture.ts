@@ -17,21 +17,28 @@ export interface CodexRequest {
 }
 
 /** Real SDK/serializer, fake credentials and inference, loopback transport only. */
-export async function createCodexFixture() {
+export async function createCodexFixture(onRequest?: (request: CodexRequest) => void) {
   const directory = await mkdtemp(join(tmpdir(), 'jev-codex-'));
   const requests: CodexRequest[] = [];
+  const toolResponses: Array<Array<{ id: string; name: string; arguments: Record<string, unknown> }>> = [];
   let inputTokens = 80;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks);
     const body = request.headers['content-encoding'] === 'zstd' ? zstdDecompressSync(bytes) : bytes;
-    requests.push(JSON.parse(body.toString()) as CodexRequest);
+    const payload = JSON.parse(body.toString()) as CodexRequest;
+    requests.push(payload);
+    onRequest?.(payload);
     const id = requests.length;
+    const calls = toolResponses.shift();
     const output = [
       { type: 'reasoning', id: `rs_reply_${id}`, encrypted_content: `opaque_reply_${id}`, summary: [] },
-      { type: 'message', id: `msg_reply_${id}`, role: 'assistant', phase: 'final_answer', status: 'completed',
-        content: [{ type: 'output_text', text: 'fixture response', annotations: [] }] },
+      ...(calls ? calls.map((call) => ({
+        type: 'function_call', id: `fc_${call.id}`, call_id: call.id, name: call.name,
+        arguments: JSON.stringify(call.arguments), status: 'completed',
+      })) : [{ type: 'message', id: `msg_reply_${id}`, role: 'assistant', phase: 'final_answer', status: 'completed',
+        content: [{ type: 'output_text', text: 'fixture response', annotations: [] }] }]),
     ];
     const events: unknown[] = output.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item }));
     events.push({ type: 'response.completed', response: { id: `response_${id}`, status: 'completed', output,
@@ -62,6 +69,9 @@ export async function createCodexFixture() {
   return {
     directory, requests, model,
     reportInputTokens(value: number) { inputTokens = value; },
+    respondWithTools(calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>) {
+      toolResponses.push(calls);
+    },
     async session(factories: (manager: SessionManager) => ExtensionFactory[] = () => [],
       manager = SessionManager.create(directory, join(directory, 'sessions')), tools: string[] = []) {
       const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: false },

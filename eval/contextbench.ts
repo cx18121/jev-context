@@ -2,9 +2,8 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { buildSessionProjection, truncateHead, type SessionEntry } from '@earendil-works/pi-coding-agent';
-import { measureRequest } from '../src/budget.ts';
 import { readHistory, type Evidence } from '../src/history.ts';
-import { mapProviderEvidence } from '../src/provider-view.ts';
+import { isToolOutput, mapProviderEvidence, readProviderPayload } from '../src/provider-view.ts';
 
 export const CONTEXTBENCH_REVISION = '1436c28a8eb95496da4ea69ad458b9f8a8eb7d61';
 
@@ -83,7 +82,6 @@ export function captureRequest(input: {
   model: Model<Api>; source: SourceSnapshot;
 }): RequestCapture {
   const { branch, source, payload, model } = input;
-  if (model.api !== 'openai-completions') throw new Error('ContextBench capture currently supports only openai-completions');
   if (!input.sessionId || !input.requestId) throw new Error('Missing capture identity');
   const sourceIdentity = sourceHash(source);
   const branchIds = branch.map((entry) => entry.id);
@@ -92,10 +90,9 @@ export function captureRequest(input: {
   }
   const view = buildSessionProjection(branch).messages;
   const history = readHistory(branch, view);
-  measureRequest(payload, model, { contextLimit: model.contextWindow, marginTokens: 0 });
+  const { items } = readProviderPayload(payload, model.api);
   const mapped = mapProviderEvidence(payload, view, history.evidence, model);
-  const wire = payload as { messages: Array<Record<string, unknown>> };
-  if (wire.messages.filter((message) => message.role === 'tool').length !== mapped.length) {
+  if (items.filter((item) => isToolOutput(item, model.api)).length !== mapped.length) {
     throw new Error('Provider contains unaccounted tool results');
   }
   return {

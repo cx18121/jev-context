@@ -6,6 +6,8 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { analyzeCaptures, captureRequest, exportDiscovery, mergeSpans, type RequestCapture, type SourceSnapshot } from '../eval/contextbench.ts';
 import { contextFixture, contextbenchDiagnostic, fixtureModel, fixtureSource } from '../eval/contextbench-fixture.ts';
 import { createContextExtension, STOP_ENTRY } from '../src/extension.ts';
+import { isToolOutput, readProviderPayload } from '../src/provider-view.ts';
+import { createCodexFixture } from './codex-fixture.ts';
 import { createPiFixture } from './pi-fixture.ts';
 
 const reference = [{ file: 'answer.ts', start: 1, end: 1 }];
@@ -119,12 +121,13 @@ test('a budget stop is not a captured request or a scored zero', async () => {
   } finally { await fixture.close(); }
 });
 
-test('real SDK transport captures reads, retirement and restoration without another execution or gold in the prompt', async () => {
+for (const createFixture of [createPiFixture, createCodexFixture]) {
+test(`${createFixture.name}: transport captures reads, retirement and restoration without another execution or gold in the prompt`, async () => {
   const captures: RequestCapture[] = [];
   const captureErrors: unknown[] = [];
   let manager: SessionManager;
   let source: SourceSnapshot;
-  const fixture = await createPiFixture((payload) => {
+  const fixture = await createFixture((payload) => {
     try {
       captures.push(captureRequest({ sessionId: 'sdk-fixture', requestId: `http-${captures.length}`, branch: manager.getBranch(), payload, model: fixture.model, source }));
     } catch (error) { captureErrors.push(error); }
@@ -137,7 +140,7 @@ test('real SDK transport captures reads, retirement and restoration without anot
     manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
     let selection: string[] | null = null;
     const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'scripted-v1', budget: { contextLimit: 32768, marginTokens: 1024 }, select: () => selection,
+      policy: 'scripted-v1', budget: { contextLimit: 32768, marginTokens: 1024, outputReserveTokens: 1024 }, select: () => selection,
     })], manager, ['read']);
     const executed: string[] = [];
     session.subscribe((event) => { if (event.type === 'tool_execution_start') executed.push(event.toolCallId); });
@@ -145,7 +148,7 @@ test('real SDK transport captures reads, retirement and restoration without anot
     await session.prompt('Read repo/answer.ts.');
     fixture.respondWithTools([{ id: 'read_other', name: 'read', arguments: { path: 'repo/other.ts' } }]);
     await session.prompt('Read repo/other.ts.');
-    const original = manager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolCallId === 'read_answer');
+    const original = manager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolCallId.split('|')[0] === 'read_answer');
     assert.ok(original);
     const before = structuredClone(original);
     selection = [original.id];
@@ -156,7 +159,7 @@ test('real SDK transport captures reads, retirement and restoration without anot
     assert.deepEqual(errors, []);
     assert.equal(captures.length, fixture.requests.length);
     assert.equal(captures.length, 6);
-    assert.deepEqual(executed, ['read_answer', 'read_other']);
+    assert.deepEqual(executed.map((id) => id.split('|')[0]), ['read_answer', 'read_other']);
     assert.deepEqual(manager.getBranch().find((entry) => entry.id === original.id), before);
     const goldSentinel = 'evaluator-only-gold-annotation';
     const gold = { annotation: goldSentinel, spans: reference };
@@ -167,6 +170,34 @@ test('real SDK transport captures reads, retirement and restoration without anot
     assert.deepEqual(report.requests.at(-1)!.newEvidenceIds, []);
     assert.deepEqual(report.requests.at(-1)!.unmapped, []);
     assert.ok(!JSON.stringify(fixture.requests).includes(goldSentinel));
-    assert.match(String(fixture.requests.at(-1)!.messages.find((message) => message.tool_call_id === 'read_answer')?.content), /restored historical observation/);
+    const lastPayload = fixture.requests.at(-1)!;
+    const codex = fixture.model.api === 'openai-codex-responses';
+    const textKey = codex ? 'output' : 'content';
+    const { items } = readProviderPayload(lastPayload, fixture.model.api);
+    const answer = items.find((item) => isToolOutput(item, fixture.model.api) && (item.call_id ?? item.tool_call_id) === 'read_answer')!;
+    assert.match(String(answer[textKey]), /restored historical observation/);
+    const captureInput = { sessionId: 'sdk-fixture', requestId: 'validation', branch: manager.getBranch(), model: fixture.model, source };
+    const changed = structuredClone(lastPayload);
+    readProviderPayload(changed, fixture.model.api).items.find((item) => isToolOutput(item, fixture.model.api))![textKey] = 'not the selected evidence';
+    assert.throws(() => captureRequest({ ...captureInput, payload: changed }), /differs from the selected view/);
+    for (const type of codex ? ['function_call_output', 'custom_tool_call_output'] : ['tool']) {
+      const extra = structuredClone(lastPayload);
+      readProviderPayload(extra, fixture.model.api).items.push(codex
+        ? { type, call_id: 'foreign', output: 'unaccounted' }
+        : { role: 'tool', tool_call_id: 'foreign', content: 'unaccounted' });
+      assert.throws(() => captureRequest({ ...captureInput, payload: extra }), /unaccounted/);
+    }
+    if (codex) {
+      const reasoning = items.filter((item) => item.type === 'reasoning');
+      assert.deepEqual(reasoning, Array.from({ length: 5 }, (_, i) => ({
+        type: 'reasoning', id: `rs_reply_${i + 1}`, encrypted_content: `opaque_reply_${i + 1}`, summary: [],
+      })));
+      const custom = structuredClone(lastPayload);
+      for (const item of readProviderPayload(custom, fixture.model.api).items) {
+        if (item.type === 'function_call_output') item.type = 'custom_tool_call_output';
+      }
+      assert.deepEqual(captureRequest({ ...captureInput, payload: custom }).evidence, captures.at(-1)!.evidence);
+    }
   } finally { await fixture.close(); }
 });
+}

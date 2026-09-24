@@ -70,7 +70,7 @@ export function providerInstructions(payload: unknown, api: Api) {
   ];
 }
 
-function isToolOutput(item: Record<string, unknown>, api: Api) {
+export function isToolOutput(item: Record<string, unknown>, api: Api) {
   return api === 'openai-completions' ? item.role === 'tool'
     : item.type === 'function_call_output' || item.type === 'custom_tool_call_output';
 }
