@@ -6,7 +6,7 @@ import { measureRequest, type BudgetMeasurement, type RequestBudget } from './bu
 import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
-import { JevInputLimitError, prepareJevRequests } from './judge-state.ts';
+import { planJevSelection, prepareJevRequests, type UnjudgedCandidate } from './judge-state.ts';
 import { mapProviderEvidence } from './provider-view.ts';
 import { createUsageAnchor, type UsageAnchor, type WorkingMeasurement } from './working-context.ts';
 import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
@@ -58,12 +58,13 @@ interface Attempt {
     retrieval: { version: string; limit: number; poolSize: number; matchedCount: number; candidateIds: string[] } | null;
     restoreAtOrAbove: number;
     restoredIds?: string[];
+    skippedRestoreIds?: string[];
+    unjudged?: UnjudgedCandidate[];
     proposedRetiredIds?: string[];
     workingContext?: UsageRecord['workingContext'];
     deferral?: {
-      reason: JevInputLimitError['reason'] | 'accounted-judge-failure';
+      reason: 'accounted-judge-failure';
       unjudgedCandidateIds: string[];
-      input?: JevInputLimitError['input'];
     };
   };
   budget?: BudgetMeasurement;
@@ -201,19 +202,15 @@ export function createContextExtension(manager: SessionManager, options: Context
           let relevance: Record<string, number> = {};
           let deferral: NonNullable<Attempt['reconsideration']>['deferral'];
           if ((options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
-            let batches: ReturnType<typeof prepareJevRequests> | undefined;
-            try {
-              batches = prepareJevRequests(plan, messages, ctx.model.api);
-            } catch (error) {
-              if (!(error instanceof JevInputLimitError) || options.policy !== 'jev-select-v1' || !plan.before.fits) throw error;
-              deferral = { reason: error.reason, input: error.input, unjudgedCandidateIds: order };
-            }
+            const preparedSelection = selectionPlan ? planJevSelection(plan, messages, ctx.model.api) : undefined;
+            const batches = preparedSelection?.batches ?? prepareJevRequests(plan, messages, ctx.model.api);
+            if (current.reconsideration && preparedSelection) current.reconsideration.unjudged = preparedSelection.unjudged;
             const deadline = performance.now() + options.jev.timeoutMs;
-            for (const [batchIndex, prepared] of (batches ?? []).entries()) {
+            for (const [batchIndex, prepared] of batches.entries()) {
               signal.throwIfAborted();
               const timeoutMs = Math.floor(deadline - performance.now());
               if (timeoutMs < 1) throw new JevError('Jev decision deadline exceeded');
-              const batchIdentity = { batchIndex, batchCount: batches!.length };
+              const batchIdentity = { batchIndex, batchCount: batches.length };
               pi.appendEntry(JUDGE_START_ENTRY, {
                 version: 1, requestId: current.id, sourceLeafId: current.leafId,
                 policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION, stateProviderApi: ctx.model.api,
@@ -241,16 +238,16 @@ export function createContextExtension(manager: SessionManager, options: Context
               if (performance.now() >= deadline) throw new JevError('Jev decision deadline exceeded');
               Object.assign(relevance, judged.relevance);
             }
-            if (batches && !deferral) {
+            if (!deferral) {
               order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
                 .sort((a, b) => relevance[a]! - relevance[b]!);
             }
           }
           const proposal = deferral
-            ? { payload, budget: plan.before, retiredIds: history.retiredIds, restoredIds: [], workingBudget: selectionPlan?.workingBefore }
+            ? { payload, budget: plan.before, retiredIds: history.retiredIds, restoredIds: [], skippedRestoreIds: [], workingBudget: selectionPlan?.workingBefore }
             : selectionPlan && options.policy === 'jev-select-v1'
               ? applySelection(selectionPlan, relevance, options.jev.retireBelow, options.selection.restoreAtOrAbove, ctx.model, options.budget)
-              : { ...applyRetirement(plan, order, ctx.model, options.budget), restoredIds: [], workingBudget: undefined };
+              : { ...applyRetirement(plan, order, ctx.model, options.budget), restoredIds: [], skippedRestoreIds: [], workingBudget: undefined };
           if (proposal.workingBudget && options.policy === 'jev-select-v1') {
             current.workingContext = { ...proposal.workingBudget, configuredLimit: options.selection.workingContextLimit ?? null };
           }
@@ -258,7 +255,7 @@ export function createContextExtension(manager: SessionManager, options: Context
           current.budget = proposal.budget;
           if (current.reconsideration) {
             current.reconsideration = { ...current.reconsideration,
-              restoredIds: proposal.restoredIds, proposedRetiredIds: proposal.retiredIds,
+              restoredIds: proposal.restoredIds, skippedRestoreIds: proposal.skippedRestoreIds, proposedRetiredIds: proposal.retiredIds,
               workingContext: current.workingContext,
               ...(deferral && { deferral }),
             };

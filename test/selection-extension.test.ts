@@ -122,7 +122,7 @@ test('a completed real tool exchange creates another restoration opportunity whi
   } finally { await judge.close(); await fixture.close(); }
 });
 
-test('a same-size swap is committed, while a selected restoration that cannot fit stops without changing the recorded view', async () => {
+test('an archive hit cannot displace unjudged visible evidence or stop a fitting wire request', async () => {
   const fixture = await createPiFixture();
   const judge = await createJevFixture();
   try {
@@ -132,37 +132,32 @@ test('a same-size swap is committed, while a selected restoration that cannot fi
     await control.session.prompt('Continue.');
     const measured = measureRequest(fixture.requests[0]!, fixture.model, roomy);
     const budget = { ...roomy, contextLimit: measured.inputEstimate + measured.outputReserve + measured.marginTokens };
-    for (const canRetire of [true, false]) {
+    for (const restoreScore of [0.9, 0.8]) {
       const manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
       const ids = seed(manager);
       judge.respond((request) => {
         const body = jevResponse(request);
-        body.answers[ids.a]!.noul = 0.9;
-        body.answers[ids.b]!.noul = canRetire ? 0.1 : judge.config.retireBelow;
+        assert.deepEqual(Object.keys(request.questions), [ids.a]);
+        body.answers[ids.a]!.noul = restoreScore;
         return { body };
       });
-      const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget, jev: judge.config, selection })], manager);
+      let before: unknown;
+      const run = await fixture.session((manager) => [
+        (pi) => { pi.on('before_provider_request', (event) => { before = JSON.parse(JSON.stringify(event.payload)); }); },
+        createContextExtension(manager, { policy: 'jev-select-v1', budget, jev: judge.config, selection }),
+      ], manager);
       await run.session.prompt('Continue.');
       const records = data<SelectionRecord>(manager, SELECTION_ENTRY);
-      if (canRetire) {
-        assert.equal(records.length, 2);
-        assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.b]);
-        assert.match(tool(fixture.requests.at(-1)!, 'a'), /restored historical observation/);
-        assert.match(tool(fixture.requests.at(-1)!, 'b'), /retired observation/);
-        assert.equal(measureRequest(fixture.requests.at(-1)!, fixture.model, budget).fits, true);
-      } else {
-        assert.equal(records.length, 1);
-        assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.a]);
-        const stopped = data<{ kind: string; budget: { fits: boolean }; reconsideration: { restoredIds: string[]; proposedRetiredIds: string[] } }>(manager, STOP_ENTRY)[0]!;
-        assert.equal(stopped.kind, 'budget');
-        assert.equal(stopped.budget.fits, false);
-        assert.deepEqual(stopped.reconsideration.restoredIds, [ids.a]);
-        assert.deepEqual(stopped.reconsideration.proposedRetiredIds, []);
-        assert.equal(data(manager, JUDGE_RESULT_ENTRY).length, 1);
-      }
+      assert.equal(records.length, 2);
+      assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [ids.a]);
+      assert.deepEqual(fixture.requests.at(-1), before);
+      assert.equal(data(manager, STOP_ENTRY).length, 0);
+      const checkpoint = data<{ reconsideration: { skippedRestoreIds: string[] } }>(manager, SELECTION_ENTRY).at(-1)!;
+      assert.deepEqual(checkpoint.reconsideration.skippedRestoreIds, [ids.a]);
+      assert.equal(data(manager, JUDGE_RESULT_ENTRY).length, 1);
       assert.deepEqual(run.errors, []);
     }
-    assert.equal(fixture.requests.length, 2); // Control and successful swap only.
+    assert.equal(fixture.requests.length, 3); // Control and both unchanged, fitting views.
     assert.equal(judge.requests.length, 2);
   } finally { await judge.close(); await fixture.close(); }
 });

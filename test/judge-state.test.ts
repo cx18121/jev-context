@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { readHistory, buildView } from '../src/history.ts';
-import { JevInputLimitError, prepareJevRequest, prepareJevRequests, JEV_PAIR_BYTES, JEV_REQUEST_BYTES, JEV_MAX_BATCHES } from '../src/judge-state.ts';
+import { readHistory, buildView, commitSelection } from '../src/history.ts';
+import { JevInputLimitError, planJevSelection, prepareJevRequest, prepareJevRequests, JEV_PAIR_BYTES, JEV_REQUEST_BYTES, JEV_MAX_BATCHES } from '../src/judge-state.ts';
 import { prepareRetirement } from '../src/retirement.ts';
 import { appendExchange, assistant, result } from './history-fixture.ts';
 
@@ -160,6 +160,61 @@ test('too many batches and one oversized candidate reject the entire decision du
     assert.equal(error.reason, 'pair-cap');
     return true;
   });
+});
+
+test('selection skips oversized whole candidates and keeps their state explicitly unavailable', () => {
+  for (const archived of [false, true]) {
+    const manager = SessionManager.inMemory();
+    const [large] = appendExchange(manager, [result('large', 'x'.repeat(35_000))]);
+    const [small] = appendExchange(manager, [result('small', 'useful '.repeat(50))]);
+    appendExchange(manager, [result('latest', 'protected')]);
+    if (archived) commitSelection(manager, [large!], 'scripted-v1');
+    const fixture = prepared(manager);
+    if (archived) fixture.plan.candidates.unshift({ ...fixture.plan.candidates[0]!,
+      evidence: fixture.plan.history.evidence[0]!, text: 'x'.repeat(35_000) });
+    const before = structuredClone(fixture);
+    const selected = planJevSelection(fixture.plan, fixture.messages, model.api);
+    assert.deepEqual(selected.unjudged.map(({ evidenceId, reason }) => ({ evidenceId, reason })),
+      [{ evidenceId: large, reason: 'pair-cap' }]);
+    assert.ok(selected.unjudged[0]!.pairBytes > JEV_PAIR_BYTES);
+    assert.deepEqual(selected.batches.flatMap((b) => Object.keys(b.request.questions)), [small]);
+    const state = selected.batches[0]!.request.state as { conversation: Array<{ evidenceId?: string; content: unknown }> };
+    assert.deepEqual(state.conversation.find((entry) => entry.evidenceId === large)!.content,
+      { type: archived ? 'retired-observation' : 'omitted-for-judge-budget' });
+    selected.batches.forEach(assertSizes);
+    assert.deepEqual(fixture, before);
+  }
+});
+
+test('selection caps calls but still admits smaller later candidates into remaining batch space', () => {
+  const manager = SessionManager.inMemory();
+  for (let i = 0; i < 20; i++) appendExchange(manager, [result(`large${i}`, 'x'.repeat(18000))]);
+  const [small] = appendExchange(manager, [result('small', 'small'.repeat(100))]);
+  appendExchange(manager, [result('latest', 'protected')]);
+  const fixture = prepared(manager);
+  const selected = planJevSelection(fixture.plan, fixture.messages, model.api);
+  assert.equal(selected.batches.length, JEV_MAX_BATCHES);
+  assert.ok(selected.unjudged.length > 0);
+  assert.ok(selected.unjudged.every((item) => item.reason === 'decision-cap'));
+  const judged = selected.batches.flatMap((b) => Object.keys(b.request.questions));
+  assert.ok(judged.includes(small!));
+  assert.deepEqual(new Set([...judged, ...selected.unjudged.map((item) => item.evidenceId)]),
+    new Set(fixture.plan.candidates.map((item) => item.evidence.id)));
+  assert.equal(judged.length + selected.unjudged.length, fixture.plan.candidates.length);
+  selected.batches.forEach(assertSizes);
+  for (const batch of selected.batches) assert.deepEqual(batch.request.state, selected.batches[0]!.request.state);
+});
+
+test('zero fitting candidates returns measurements, not an empty HTTP request', () => {
+  const manager = SessionManager.inMemory();
+  const [large] = appendExchange(manager, [result('large', 'x'.repeat(35_000))]);
+  appendExchange(manager, [result('latest', 'protected')]);
+  const fixture = prepared(manager);
+  const selected = planJevSelection(fixture.plan, fixture.messages, model.api);
+  assert.deepEqual(selected.batches, []);
+  assert.equal(selected.unjudged[0]!.evidenceId, large);
+  assert.ok(selected.unjudged[0]!.stateBytes > 0);
+  assert.ok(selected.unjudged[0]!.pairBytes > JEV_PAIR_BYTES);
 });
 
 function assertSizes(prepared: ReturnType<typeof prepareJevRequest>) {

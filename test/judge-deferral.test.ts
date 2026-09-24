@@ -22,7 +22,8 @@ function seed(manager: SessionManager, huge = false) {
 interface Checkpoint {
   reconsideration: {
     retrieval: { candidateIds: string[] };
-    deferral: { reason: string; unjudgedCandidateIds: string[]; input?: { maxPairBytes: number } };
+    deferral?: { reason: string; unjudgedCandidateIds: string[] };
+    unjudged: Array<{ evidenceId: string; reason: string; pairBytes: number }>;
   };
 }
 
@@ -46,10 +47,16 @@ test('deferrals keep the wire view, record unjudged archive candidates, and cons
       assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [old]);
       const checkpoint = records<Checkpoint>(manager, SELECTION_ENTRY).at(-1)!;
       assert.deepEqual(checkpoint.reconsideration.retrieval.candidateIds, [old]);
-      assert.deepEqual(checkpoint.reconsideration.deferral.unjudgedCandidateIds, [old]);
-      assert.equal(checkpoint.reconsideration.deferral.reason, failure === 'pair-cap' ? failure : 'accounted-judge-failure');
-      if (failure === 'pair-cap') assert.ok(checkpoint.reconsideration.deferral.input!.maxPairBytes > 30_000);
-      else assert.ok(records<{ pricedCostUsd: number | null }>(manager, JUDGE_RESULT_ENTRY)[0]!.pricedCostUsd !== null);
+      if (failure === 'pair-cap') {
+        assert.equal(checkpoint.reconsideration.deferral, undefined);
+        assert.deepEqual(checkpoint.reconsideration.unjudged.map(({ evidenceId, reason }) => ({ evidenceId, reason })),
+          [{ evidenceId: old, reason: 'pair-cap' }]);
+        assert.ok(checkpoint.reconsideration.unjudged[0]!.pairBytes > 30_000);
+      } else {
+        assert.deepEqual(checkpoint.reconsideration.deferral!.unjudgedCandidateIds, [old]);
+        assert.equal(checkpoint.reconsideration.deferral!.reason, 'accounted-judge-failure');
+        assert.ok(records<{ pricedCostUsd: number | null }>(manager, JUDGE_RESULT_ENTRY)[0]!.pricedCostUsd !== null);
+      }
       const usage = records<UsageRecord>(manager, USAGE_ENTRY)[0]!;
       assert.equal(usage.budget!.fits, true);
       assert.equal(usage.workingContext!.fits, null);
@@ -74,6 +81,49 @@ test('deferrals keep the wire view, record unjudged archive candidates, and cons
       assert.equal(records(resumed.manager, SELECTION_ENTRY).length, 3);
       assert.equal(records<{ budget: { fits: boolean } }>(resumed.manager, STOP_ENTRY).at(-1)!.budget.fits, false);
       assert.deepEqual([...run.errors, ...resumed.errors], []);
+    } finally { await judge.close(); await f.close(); }
+  }
+});
+
+test('mixed-size hard-pressure decisions change only judged wire evidence, or stop if that cannot make room', async () => {
+  for (const canRetire of [true, false]) {
+    const f = await createPiFixture();
+    const judge = await createJevFixture();
+    try {
+      const manager = SessionManager.create(f.directory);
+      manager.appendMessage({ role: 'user', content: 'Implement the API contract.', timestamp: 1 });
+      const largeText = 'L'.repeat(28_500);
+      const [large] = appendExchange(manager, [result('large', largeText)]);
+      const [small] = appendExchange(manager, [result('small', 'small'.repeat(1000))]);
+      appendExchange(manager, [result('latest', 'Protected current output.')]);
+      const originals = structuredClone(manager.getBranch().filter((entry) => entry.type === 'message'));
+      judge.respond((request) => {
+        assert.deepEqual(Object.keys(request.questions), [small]);
+        const body = jevResponse(request);
+        body.answers[small!]!.noul = canRetire ? 0.1 : 0.9;
+        return { body };
+      });
+      const run = await f.session((m) => [createContextExtension(m, {
+        policy: 'jev-select-v1', budget: { contextLimit: 31_000, marginTokens: 0 },
+        selection: { archiveLimit: 2, restoreAtOrAbove: 0.8 }, jev: judge.config,
+      })], manager);
+      await run.session.prompt('Continue.');
+      assert.equal(judge.requests.length, 1);
+      assert.equal(f.requests.length, canRetire ? 1 : 0);
+      assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'message').slice(0, originals.length), originals);
+      if (canRetire) {
+        const wire = f.requests[0]!.messages;
+        assert.equal(wire.find((item) => item.tool_call_id === 'large')!.content, largeText);
+        assert.match(String(wire.find((item) => item.tool_call_id === 'small')!.content), /retired observation/);
+        const checkpoint = records<Checkpoint>(manager, SELECTION_ENTRY)[0]!;
+        assert.deepEqual(checkpoint.reconsideration.unjudged.map((item) => item.evidenceId), [large]);
+        assert.equal(checkpoint.reconsideration.deferral, undefined);
+      } else {
+        assert.equal(records(manager, SELECTION_ENTRY).length, 0);
+        assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 0);
+        assert.equal(records<{ budget: { fits: boolean } }>(manager, STOP_ENTRY)[0]!.budget.fits, false);
+      }
+      assert.deepEqual(run.errors, []);
     } finally { await judge.close(); await f.close(); }
   }
 });

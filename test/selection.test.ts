@@ -52,7 +52,8 @@ test('restoration judges and renders historical original text, not stubs; unchan
   assert.ok(candidate.observation.endsWith(providerText(f.history.evidence[0]!.result)));
   assert.ok(!candidate.observation.includes('retired observation'));
   assert.ok(!JSON.stringify(request.state).includes('API original'));
-  const selected = applySelection(plan, { [f.a]: 0.8, [f.b]: 0.1 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(plan.candidates.map((item) => item.evidence.id), [f.a]);
+  const selected = applySelection(plan, { [f.a]: 0.8 }, 0.2, 0.8, model, budget);
   assert.deepEqual(selected.restoredIds, [f.a]);
   assert.deepEqual(selected.retiredIds, []);
   assert.equal(selected.budget.fits, true);
@@ -64,10 +65,10 @@ test('restoration judges and renders historical original text, not stubs; unchan
   assert.deepEqual((selected.payload as typeof f.payload).messages.filter((message) => message.role === 'tool').map((message) => message.content), rendered);
 });
 
-test('a same-size set swap restores first and retires only low-rated visible evidence needed for room', () => {
+test('under pressure a set swap restores only with judged low-rated evidence making room', () => {
   const f = fixture();
-  const { plan, budget } = f.plan(f.size);
-  assert.equal(plan.before.fits, true);
+  const { plan, budget } = f.plan(f.size - 1);
+  assert.equal(plan.before.fits, false);
   const selected = applySelection(plan, { [f.a]: 0.9, [f.b]: 0.1 }, 0.2, 0.8, model, budget);
   assert.deepEqual(selected.restoredIds, [f.a]);
   assert.deepEqual(selected.retiredIds, [f.b]);
@@ -75,16 +76,57 @@ test('a same-size set swap restores first and retires only low-rated visible evi
   assert.equal((selected.payload as typeof f.payload).messages.at(-1)!.content, 'Protected');
 });
 
-test('threshold gap preserves uncertain archive and visible evidence; cannot-fit does not re-retire selected restorations', () => {
+test('a fitting base does not rejudge visible evidence, and an oversized restoration stays archived', () => {
   const f = fixture();
   const { plan, budget } = f.plan(f.size);
-  const unchanged = applySelection(plan, { [f.a]: 0.799, [f.b]: 0.1 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(plan.candidates.map((item) => item.evidence.id), [f.a]);
+  const unchanged = applySelection(plan, { [f.a]: 0.799 }, 0.2, 0.8, model, budget);
   assert.deepEqual(unchanged.retiredIds, [f.a]);
   assert.deepEqual(unchanged.restoredIds, []);
-  const cannotFit = applySelection(plan, { [f.a]: 0.8, [f.b]: 0.2 }, 0.2, 0.8, model, budget);
-  assert.equal(cannotFit.budget.fits, false);
-  assert.deepEqual(cannotFit.restoredIds, [f.a]);
-  assert.deepEqual(cannotFit.retiredIds, []);
+  const cannotFit = applySelection(plan, { [f.a]: 0.8 }, 0.2, 0.8, model, budget);
+  assert.equal(cannotFit.budget.fits, true);
+  assert.deepEqual(cannotFit.restoredIds, []);
+  assert.deepEqual(cannotFit.skippedRestoreIds, [f.a]);
+  assert.deepEqual(cannotFit.retiredIds, [f.a]);
+  assert.deepEqual(cannotFit.payload, f.payload);
+});
+
+test('partial scores never change unjudged evidence, even under hard pressure', () => {
+  const f = fixture();
+  const { plan, budget } = f.plan(f.size - 1);
+  const noScores = applySelection(plan, {}, 0.2, 0.8, model, budget);
+  assert.deepEqual(noScores.payload, f.payload);
+  assert.equal(noScores.budget.fits, false);
+  const selected = applySelection(plan, { [f.b]: 0.1 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(new Set(selected.retiredIds), new Set([f.a, f.b]));
+  assert.deepEqual(selected.restoredIds, []);
+  assert.equal(selected.budget.fits, true);
+});
+
+test('a failed restoration rolls back trial retirements and does not block a smaller restoration', () => {
+  const manager = SessionManager.inMemory();
+  const [large] = appendExchange(manager, [result('large', 'large'.repeat(2000))]);
+  const [small] = appendExchange(manager, [result('small', 'small'.repeat(100))]);
+  const [first] = appendExchange(manager, [result('first', 'first'.repeat(100))]);
+  const [second] = appendExchange(manager, [result('second', 'second'.repeat(400))]);
+  appendExchange(manager, [result('latest', 'Protected')]);
+  record(manager, [large!, small!]);
+  const messages = manager.buildSessionContext().messages;
+  const history = readHistory(manager.getBranch(), messages);
+  const payload = { messages: messages.filter((m) => m.role === 'toolResult').map((m) =>
+    ({ role: 'tool', tool_call_id: m.toolCallId, content: providerText(m) })), max_tokens: 100 };
+  const budget = { contextLimit: Buffer.byteLength(JSON.stringify(payload)) + 99, marginTokens: 0 };
+  const plan = prepareSelection(payload, messages, history, model, budget, [large!, small!]);
+  const base = applySelection(plan, { [first!]: 0.05 }, 0.2, 0.8, model, budget);
+  const failed = applySelection(plan, { [large!]: 0.99, [first!]: 0.05, [second!]: 0.1 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(failed.payload, base.payload, 'failed trial restores the exact prior view');
+  assert.deepEqual(failed.retiredIds, base.retiredIds);
+  assert.deepEqual(failed.skippedRestoreIds, [large]);
+  const selected = applySelection(plan, { [large!]: 0.99, [small!]: 0.9, [first!]: 0.05, [second!]: 0.1 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(selected.restoredIds, [small]);
+  assert.deepEqual(selected.skippedRestoreIds, [large]);
+  assert.deepEqual(new Set(selected.retiredIds), new Set([large, first, second]));
+  assert.equal(selected.budget.fits, true);
 });
 
 test('archive candidates must map to the existing unique stub at the provider boundary', () => {
@@ -129,13 +171,16 @@ test('only complete exchanges trigger, including a complete non-text exchange', 
   assert.deepEqual(selectionEvents(f.manager.getBranch(), incomplete), { userIds: [], exchangeIds: [] });
 });
 
-test('invalid limits, overlapping thresholds, archive identities and partial scores fail explicitly', () => {
+test('invalid limits, overlapping thresholds, archive identities and invalid scores fail explicitly', () => {
   for (const archiveLimit of [0, -1, 1.5, Infinity]) assert.throws(() => validateSelectionConfig({ archiveLimit, restoreAtOrAbove: 0.8 }, 0.2, { contextLimit: 100_000, marginTokens: 0 }), /archiveLimit/);
   for (const restoreAtOrAbove of [0.1, 0.2, 1.1, NaN]) assert.throws(() => validateSelectionConfig({ archiveLimit: 2, restoreAtOrAbove }, 0.2, { contextLimit: 100_000, marginTokens: 0 }), /restoreAtOrAbove/);
   const f = fixture();
   for (const ids of [[f.a, f.a], [f.b], ['missing']]) assert.throws(() => prepareSelection(f.payload, f.view, f.history, model, { contextLimit: 100000, marginTokens: 0 }, ids), /archive candidate/);
   const { plan, budget } = f.plan();
-  assert.throws(() => applySelection(plan, { [f.a]: 0.9 }, 0.2, 0.8, model, budget), /scores/);
+  for (const relevance of [{ missing: 0.9 }, { [f.a]: NaN }, { [f.a]: -1 }, { [f.a]: 1.1 }]) {
+    assert.throws(() => applySelection(plan, relevance, 0.2, 0.8, model, budget), /scores/);
+  }
+  assert.deepEqual(applySelection(plan, {}, 0.2, 0.8, model, budget).payload, f.payload);
 });
 
 test('soft pressure builds candidates before the hard limit, with an inclusive target boundary', () => {
@@ -170,17 +215,19 @@ test('a missed soft target neither retires relevant evidence nor becomes a hard-
   }
 });
 
-test('restorations consume the soft allowance but are never re-retired to satisfy it', () => {
+test('restorations must fit the known soft allowance, even when the hard guard has room', () => {
   const f = fixture();
   const budget = { contextLimit: 100_000, marginTokens: 0 };
   const plan = prepareSelection(f.payload, f.view, f.history, model, budget, [f.a], { workingContextLimit: f.workingSize, anchor: f.anchor });
-  for (const score of [0.1, 0.9]) {
-    const selected = applySelection(plan, { [f.a]: 0.9, [f.b]: score }, 0.2, 0.8, model, budget);
-    assert.deepEqual(selected.restoredIds, [f.a]);
-    assert.deepEqual(selected.retiredIds, score < 0.2 ? [f.b] : []);
-    assert.equal(selected.workingBudget.fits, score < 0.2);
-    assert.equal(selected.budget.fits, true);
-  }
+  const selected = applySelection(plan, { [f.a]: 0.9 }, 0.2, 0.8, model, budget);
+  assert.deepEqual(selected.restoredIds, []);
+  assert.deepEqual(selected.skippedRestoreIds, [f.a]);
+  assert.deepEqual(selected.retiredIds, [f.a]);
+  assert.equal(selected.workingBudget.fits, true);
+  assert.equal(selected.budget.fits, true);
+  assert.deepEqual(selected.payload, f.payload);
+  const unknown = prepareSelection(f.payload, f.view, f.history, model, budget, [f.a], { workingContextLimit: 1 });
+  assert.deepEqual(applySelection(unknown, { [f.a]: 0.9 }, 0.2, 0.8, model, budget).restoredIds, [f.a]);
 });
 
 test('without a fresh event soft pressure waits, while hard pressure still selects', () => {

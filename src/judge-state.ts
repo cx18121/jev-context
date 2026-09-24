@@ -17,6 +17,13 @@ export const JEV_PAIR_BYTES = 30_000;
 export const JEV_REQUEST_BYTES = 60_000;
 export const JEV_MAX_BATCHES = 8;
 
+export interface UnjudgedCandidate {
+  evidenceId: string;
+  reason: 'pair-cap' | 'decision-cap';
+  stateBytes: number;
+  pairBytes: number;
+}
+
 interface JudgeInputSize {
   requestBytes: number;
   maxPairBytes: number;
@@ -43,19 +50,25 @@ function textContent(content: string | (TextContent | ImageContent)[]) {
 
 // Pilot fixtures deliberately require a single request; both paths use the same packer.
 export function prepareJevRequest(plan: JudgeInput, messages: AgentMessage[], api: Api) {
-  return packJevRequests(plan, messages, api, 1)[0]!;
+  return packJevRequests(plan, messages, api, 1, false).batches[0]!;
 }
 
 export function prepareJevRequests(plan: JudgeInput, messages: AgentMessage[], api: Api) {
-  return packJevRequests(plan, messages, api, JEV_MAX_BATCHES);
+  return packJevRequests(plan, messages, api, JEV_MAX_BATCHES, false).batches;
 }
 
-function packJevRequests(plan: JudgeInput, messages: AgentMessage[], api: Api, maxBatches: number) {
+/** Selection preserves omitted candidates rather than treating a local limit as a global veto. */
+export function planJevSelection(plan: JudgeInput, messages: AgentMessage[], api: Api) {
+  return packJevRequests(plan, messages, api, JEV_MAX_BATCHES, true);
+}
+
+function packJevRequests(plan: JudgeInput, messages: AgentMessage[], api: Api, maxBatches: number, partial: boolean) {
   const candidateIds = new Set(plan.candidates.map((candidate) => candidate.evidence.id));
   if (candidateIds.size !== plan.candidates.length) throw new JevError('Duplicate Jev candidate identity');
   const retiredIds = new Set(plan.history.retiredIds);
   const evidence = new Map(plan.history.evidence.map((item) => [item.result.toolCallId, item]));
   const conversation: unknown[] = [];
+  const candidateMarkers = new Map<string, { type: string }>();
   const contextual: Array<{
     entry: { content: unknown; toolCall: { arguments: unknown } };
     content: unknown; arguments: unknown; evidenceId: string; contentBytes: number;
@@ -89,8 +102,9 @@ function packJevRequests(plan: JudgeInput, messages: AgentMessage[], api: Api, m
       case 'toolResult': {
         const item = evidence.get(message.toolCallId);
         if (!item) throw new JevError('Judge state is missing evidence identity');
-        const marker: unknown = { type: candidateIds.has(item.id) ? 'candidate-for-evaluation' : retiredIds.has(item.id)
+        const marker = { type: candidateIds.has(item.id) ? 'candidate-for-evaluation' : retiredIds.has(item.id)
           ? 'retired-observation' : 'omitted-for-judge-budget' };
+        if (candidateIds.has(item.id)) candidateMarkers.set(item.id, marker);
         const entry = {
           role: 'toolResult', evidenceId: item.id, toolCall: { id: item.call.id, name: item.call.name, arguments: marker },
           content: marker, isError: message.isError, capturedAt: message.timestamp,
@@ -139,30 +153,43 @@ function packJevRequests(plan: JudgeInput, messages: AgentMessage[], api: Api, m
       .map(({ evidenceId, contentBytes }) => ({ evidenceId, contentBytes })),
   });
   const fullSize = inputSize(request);
-  if (fullSize.maxPairBytes > JEV_PAIR_BYTES) throw new JevInputLimitError('pair-cap', fullSize);
+  if (!partial && fullSize.maxPairBytes > JEV_PAIR_BYTES) throw new JevInputLimitError('pair-cap', fullSize);
 
-  // Preflight the entire pool before any dispatch. Never return a fitting subset.
   const batches: JevRequest[] = [];
+  const unjudged: UnjudgedCandidate[] = [];
   let batch: JevRequest = { model: JEV_MODEL, state, questions: {} };
   for (const candidate of plan.candidates) {
     const id = candidate.evidence.id;
     const question = request.questions[id]!;
+    const pairBytes = jsonBytes({ state, question });
+    if (partial && pairBytes > JEV_PAIR_BYTES) {
+      unjudged.push({ evidenceId: id, reason: 'pair-cap', stateBytes: fullSize.stateBytes, pairBytes });
+      continue;
+    }
     batch.questions[id] = question;
     if (jsonBytes(batch) > JEV_REQUEST_BYTES) {
       delete batch.questions[id];
+      if (partial && batches.length + 1 === maxBatches) {
+        unjudged.push({ evidenceId: id, reason: 'decision-cap', stateBytes: fullSize.stateBytes, pairBytes });
+        continue;
+      }
       batches.push(batch);
       batch = { model: JEV_MODEL, state, questions: { [id]: question } };
     }
   }
-  batches.push(batch);
+  if (Object.keys(batch.questions).length) batches.push(batch);
   if (batches.length > maxBatches) {
     throw new JevInputLimitError(maxBatches === 1 ? 'batch-cap' : 'decision-cap', fullSize);
   }
+  for (const { evidenceId } of unjudged) {
+    // These markers are no larger than the provisional candidate marker.
+    candidateMarkers.get(evidenceId)!.type = retiredIds.has(evidenceId) ? 'retired-observation' : 'omitted-for-judge-budget';
+  }
 
   // One shared state and a fixed partition. Optional context never adds paid batches.
-  let headroom = Math.min(JEV_PAIR_BYTES - fullSize.maxPairBytes,
+  let headroom = Math.min(...batches.map((item) => JEV_PAIR_BYTES - inputSize(item).maxPairBytes),
     ...batches.map((item) => JEV_REQUEST_BYTES - jsonBytes(item)));
-  for (const item of [...contextual].reverse()) {
+  for (const item of batches.length ? [...contextual].reverse() : []) {
     const delta = item.contentBytes + jsonBytes(item.arguments)
       - jsonBytes(item.entry.content) - jsonBytes(item.entry.toolCall.arguments);
     if (delta > headroom) break;
@@ -171,8 +198,8 @@ function packJevRequests(plan: JudgeInput, messages: AgentMessage[], api: Api, m
     headroom -= delta;
     omitted.delete(item.evidenceId);
   }
-  return batches.map((request) => ({
+  return { unjudged, batches: batches.map((request) => ({
     request, ...inputSize(request),
     requestHash: createHash('sha256').update(JSON.stringify(request)).digest('hex'),
-  }));
+  })) };
 }

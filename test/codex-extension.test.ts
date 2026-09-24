@@ -20,7 +20,7 @@ function seed(manager: SessionManager, model: Model<Api>, toolName = 'read') {
     return manager.appendMessage(result(call.id, text, { toolName }));
   }
   const a = exchange('a', 'API contract evidence. '.repeat(170));
-  const b = exchange('b', 'Old environment evidence. '.repeat(160));
+  const b = exchange('b', 'Old environment evidence. '.repeat(240));
   exchange('new', 'Protected current result.');
   return { a, b };
 }
@@ -53,6 +53,7 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
     f.reportInputTokens(8000);
     await session.prompt('Establish usage.');
     assert.equal(judge.requests.length, 0);
+    f.reportInputTokens(7100);
     await session.prompt('Continue with environment setup.');
     assert.equal(f.requests.length, 2, JSON.stringify(records(manager, STOP_ENTRY)));
     assert.equal(judge.requests.length, 1);
@@ -68,7 +69,7 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
     assert.equal(usage.budget?.outputReserveSource, 'configured-headroom');
     assert.equal(usage.budget?.outputReserve, 1024);
     assert.equal(usage.usageAvailable, true);
-    assert.equal(usage.usage.input, 7980);
+    assert.equal(usage.usage.input, 7080);
     assert.equal(usage.usage.cacheRead, 20);
     assert.equal(usage.usage.output, 4);
     assert.equal(records<{ stateProviderApi: string }>(manager, JUDGE_START_ENTRY)[0]!.stateProviderApi, f.model.api);
@@ -83,6 +84,7 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
     assert.match(String(output(f.requests[2]!, 'a').output), /restored historical observation/);
     assert.match(String(output(f.requests[2]!, 'a').output), /API contract evidence/);
     assert.match(String(output(f.requests[2]!, 'b').output), /retired observation/);
+    assert.equal(records<UsageRecord>(manager, USAGE_ENTRY)[2]!.workingContext?.fits, true);
     assert.deepEqual(stableItems(f.requests[2]!).slice(0, originalWireItems.length), originalWireItems);
     assert.deepEqual(manager.getBranch().filter((entry) => entry.type === 'message').slice(0, originals.length), originals);
     assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionContext().messages).retiredIds, [b]);

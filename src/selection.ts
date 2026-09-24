@@ -47,7 +47,7 @@ export interface SelectionPlan extends RetirementPlan {
   workingContextLimit?: number;
 }
 
-/** One batch includes the archive shortlist and all shrinkable visible evidence that could make room. */
+/** Archive lookup does not create retirement pressure. */
 export function prepareSelection(
   payload: unknown, messages: AgentMessage[], history: HistoryView,
   model: Model<Api>, budget: RequestBudget, archiveIds: string[],
@@ -65,11 +65,11 @@ export function prepareSelection(
   if (new Set(archiveIds).size !== archiveIds.length || archiveIds.some((id) => !retired.has(id))) {
     throw new Error('Invalid archive candidate selection');
   }
-  if (before.fits && !archiveIds.length && (workingBefore.fits !== false || options.reconsider === false)) {
-    return { payload, history, before, ...working, candidates: [] };
-  }
+  const pressure = !before.fits || (workingBefore.fits === false && options.reconsider !== false);
+  if (!pressure && !archiveIds.length) return { payload, history, before, ...working, candidates: [] };
   const archive = new Set(archiveIds);
-  const eligible = history.evidence.filter((item) => !item.protectedReason && (!retired.has(item.id) || archive.has(item.id)));
+  const eligible = history.evidence.filter((item) => !item.protectedReason &&
+    (archive.has(item.id) || (pressure && !retired.has(item.id))));
   // Render from preserved originals, never from the currently stubbed view.
   const restored = new Map(buildView(history.evidence.map((item) => item.result), history, [])
     .filter((message) => message.role === 'toolResult').map((message) => [message.toolCallId, message]));
@@ -84,24 +84,18 @@ export function prepareSelection(
   return { payload, history, before, ...working, candidates };
 }
 
-/** Restore selected archive evidence, then retire low-rated visible evidence toward the soft target. */
+/** Only judged evidence can change. Optional restores must fit without sacrificing unjudged evidence. */
 export function applySelection(
   plan: SelectionPlan, relevance: Record<string, number>, retireBelow: number, restoreAtOrAbove: number,
   model: Model<Api>, budget: RequestBudget,
 ) {
-  const keys = Object.keys(relevance);
-  if (keys.length !== plan.candidates.length || plan.candidates.some((item) => {
-    const score = relevance[item.evidence.id];
-    return score === undefined || !Number.isFinite(score) || score < 0 || score > 1;
-  })) throw new Error('Invalid selection scores');
-  const restoredIds = plan.candidates.filter((item) => item.archived && relevance[item.evidence.id]! >= restoreAtOrAbove)
-    .map((item) => item.evidence.id);
-  const restored = new Set(restoredIds);
-  const retiredIds = plan.history.retiredIds.filter((id) => !restored.has(id));
+  const candidateIds = new Set(plan.candidates.map((item) => item.evidence.id));
+  if (Object.entries(relevance).some(([id, score]) =>
+    !candidateIds.has(id) || !Number.isFinite(score) || score < 0 || score > 1)) throw new Error('Invalid selection scores');
+  const restoredIds: string[] = [];
+  const skippedRestoreIds: string[] = [];
+  const retiredIds = new Set(plan.history.retiredIds);
   const payload = structuredClone(plan.payload);
-  for (const item of plan.candidates) {
-    if (restored.has(item.evidence.id)) replaceProviderText(payload, model.api, item.messageIndex, item.text);
-  }
   const order = plan.candidates.filter((item) => !item.archived && relevance[item.evidence.id]! < retireBelow)
     .sort((a, b) => relevance[a.evidence.id]! - relevance[b.evidence.id]!);
   const measure = () => {
@@ -111,11 +105,37 @@ export function applySelection(
     return { budget: hard, workingBudget: working };
   };
   let measured = measure();
-  for (const item of order) {
-    if (measured.budget.fits && measured.workingBudget.fits !== false) break;
-    replaceProviderText(payload, model.api, item.messageIndex, item.stub);
-    retiredIds.push(item.evidence.id);
+  const fits = () => measured.budget.fits && measured.workingBudget.fits !== false;
+  let next = 0;
+  const makeRoom = () => {
+    while (!fits() && next < order.length) {
+      const item = order[next++]!;
+      replaceProviderText(payload, model.api, item.messageIndex, item.stub);
+      retiredIds.add(item.evidence.id);
+      measured = measure();
+    }
+  };
+  makeRoom();
+  const restores = plan.candidates.filter((item) => item.archived && relevance[item.evidence.id]! >= restoreAtOrAbove)
+    .sort((a, b) => relevance[b.evidence.id]! - relevance[a.evidence.id]!);
+  for (const item of restores) {
+    const start = next;
+    replaceProviderText(payload, model.api, item.messageIndex, item.text);
     measured = measure();
+    makeRoom();
+    if (fits()) {
+      restoredIds.push(item.evidence.id);
+      retiredIds.delete(item.evidence.id);
+    } else {
+      replaceProviderText(payload, model.api, item.messageIndex, item.stub);
+      for (const trial of order.slice(start, next)) {
+        replaceProviderText(payload, model.api, trial.messageIndex, trial.text);
+        retiredIds.delete(trial.evidence.id);
+      }
+      next = start;
+      measured = measure();
+      skippedRestoreIds.push(item.evidence.id);
+    }
   }
-  return { payload, retiredIds: validateSelection(plan.history, retiredIds), restoredIds, ...measured };
+  return { payload, retiredIds: validateSelection(plan.history, [...retiredIds]), restoredIds, skippedRestoreIds, ...measured };
 }
