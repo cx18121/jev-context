@@ -121,6 +121,10 @@ The capture bridge supports Completions and full, stateless Codex payloads. It v
 
 **Export boundary.** Discovery steps contain newly recorded observations per captured request, including empty steps. Restorations do not count as new reads. These request boundaries differ from upstream retrieval steps, so AUC and redundancy would not be leaderboard-comparable. Final context and model patch fields are deliberately absent. Do not feed this export directly to the full upstream evaluator. At the pinned revision it can substitute a gold patch for a missing model patch when computing EditLoc and exclude error cases from aggregate scores. The bridge neither invokes that evaluator nor reports official metrics. Gold annotations are never capture inputs, and no actual ContextBench task or gold solution has been run or inspected for this fixture.
 
+## Paired native coding tasks
+
+The [paired task runner](eval/swebench/README.md) connects actual sandboxed Pi reads and Codex request captures to native SWE-bench patch grading and evaluator-only ContextBench line coverage. It reuses one trajectory per arm for all three surfaces. Task preparation, image pinning, and a frozen development-set protocol are required before live runs. Scripted local runs establish integration behavior, not benchmark quality or savings.
+
 ## Behavior proved locally
 
 Tests demonstrate the following properties against Pi 0.87.1 and the local fixture.
