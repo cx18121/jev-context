@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { readHistory, buildView } from '../src/history.ts';
-import { JevInputLimitError, prepareJevRequest, JEV_PAIR_BYTES, JEV_REQUEST_BYTES } from '../src/judge-state.ts';
+import { JevInputLimitError, prepareJevRequest, prepareJevRequests, JEV_PAIR_BYTES, JEV_REQUEST_BYTES, JEV_MAX_BATCHES } from '../src/judge-state.ts';
 import { prepareRetirement } from '../src/retirement.ts';
 import { appendExchange, assistant, result } from './history-fixture.ts';
 
@@ -61,6 +61,24 @@ test('judge state preserves middle-turn corrections, conversation authority, and
   assert.ok(requestBytes <= JEV_REQUEST_BYTES && maxPairBytes <= JEV_PAIR_BYTES);
 });
 
+test('unpaired calls retain their whole arguments in judge state', () => {
+  for (const stopReason of ['toolUse', 'aborted', 'error'] as const) {
+    const manager = SessionManager.inMemory();
+    appendExchange(manager, [result('old', 'useful evidence '.repeat(100))]);
+    const call = { type: 'toolCall' as const, id: 'unpaired', name: 'bash', arguments: { command: 'inspect UNPAIRED_ACTION --exact' } };
+    manager.appendMessage({ ...assistant([call]), stopReason });
+    appendExchange(manager, [result('latest', 'protected')]);
+    const fixture = prepared(manager);
+    assert.ok(fixture.plan.candidates.length > 0);
+    assert.ok(fixture.messages.some((m) => m.role === 'assistant' && m.content.some((b) => b.type === 'toolCall' && b.id === call.id)));
+    const batches = prepareJevRequests(fixture.plan, fixture.messages, model.api);
+    for (const batch of batches) {
+      assert.match(JSON.stringify(batch.request.state), /inspect UNPAIRED_ACTION --exact/);
+      assertSizes(batch);
+    }
+  }
+});
+
 test('large task state or a large whole candidate fails without clipping either', () => {
   for (const oversized of ['state', 'candidate']) {
     const manager = SessionManager.inMemory();
@@ -89,6 +107,57 @@ test('a full batch that exceeds the total cap fails instead of judging a partial
     assert.equal(error.reason, 'batch-cap');
     assert.ok(error.input.requestBytes > JEV_REQUEST_BYTES);
     assert.ok(error.input.maxPairBytes <= JEV_PAIR_BYTES);
+    return true;
+  });
+});
+
+test('compact state and bounded batches preserve the entire pool without repeated command arguments', () => {
+  const manager = SessionManager.inMemory();
+  manager.appendMessage({ role: 'user', content: 'Keep every public API and the Unicode 名称.', timestamp: 1 });
+  for (let i = 0; i < 20; i++) {
+    const call = { type: 'toolCall' as const, id: `command${i}`, name: 'bash', arguments: { command: `WHOLE_COMMAND_${i} ` + 'x'.repeat(2000) } };
+    manager.appendMessage(assistant([call]));
+    manager.appendMessage(result(call.id, `WHOLE_RESULT_${i} ` + 'y'.repeat(3000), { toolName: 'bash' }));
+  }
+  appendExchange(manager, [result('latest', 'protected context')]);
+  const fixture = prepared(manager);
+  const frozen = structuredClone(fixture);
+  const batches = prepareJevRequests(fixture.plan, fixture.messages, model.api);
+  assert.ok(batches.length > 1 && batches.length <= JEV_MAX_BATCHES);
+  assert.deepEqual(batches.flatMap((batch) => Object.keys(batch.request.questions)).sort(), fixture.plan.candidates.map((c) => c.evidence.id).sort());
+  for (const batch of batches) {
+    assertSizes(batch);
+    assert.deepEqual(batch.request.state, batches[0]!.request.state);
+    assert.match(JSON.stringify(batch.request.state), /Keep every public API and the Unicode 名称/);
+    assert.doesNotMatch(JSON.stringify(batch.request.state), /WHOLE_COMMAND_|WHOLE_RESULT_/);
+    for (const [id, question] of Object.entries(batch.request.questions)) {
+      const original = fixture.plan.candidates.find((candidate) => candidate.evidence.id === id)!;
+      assert.deepEqual(question.instructions.candidate, {
+        evidenceId: id, toolCall: { id: original.evidence.call.id, name: original.evidence.call.name, arguments: original.evidence.call.arguments },
+        capturedAt: original.evidence.result.timestamp,
+        isError: original.evidence.result.isError, observation: original.text,
+      });
+    }
+  }
+  assert.deepEqual(prepareJevRequests(fixture.plan, fixture.messages, model.api), batches);
+  assert.deepEqual(fixture, frozen);
+});
+
+test('too many batches and one oversized candidate reject the entire decision during preflight', () => {
+  const manager = SessionManager.inMemory();
+  for (let i = 0; i < 20; i++) appendExchange(manager, [result(`large${i}`, 'x'.repeat(18000))]);
+  appendExchange(manager, [result('latest', 'protected')]);
+  const fixture = prepared(manager);
+  assert.throws(() => prepareJevRequests(fixture.plan, fixture.messages, model.api), (error: unknown) => {
+    assert.ok(error instanceof JevInputLimitError);
+    assert.equal(error.reason, 'decision-cap');
+    assert.ok(error.input.maxPairBytes <= JEV_PAIR_BYTES);
+    return true;
+  });
+  fixture.plan.candidates.at(-1)!.text = 'x'.repeat(JEV_PAIR_BYTES);
+  assert.throws(() => prepareJevRequests(fixture.plan, fixture.messages, model.api), (error: unknown) => {
+    assert.ok(error instanceof JevInputLimitError);
+    assert.equal(error.reason, 'pair-cap');
     return true;
   });
 });

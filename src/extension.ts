@@ -6,7 +6,7 @@ import { measureRequest, type BudgetMeasurement, type RequestBudget } from './bu
 import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
-import { JevInputLimitError, prepareJevRequest } from './judge-state.ts';
+import { JevInputLimitError, prepareJevRequests } from './judge-state.ts';
 import { mapProviderEvidence } from './provider-view.ts';
 import { createUsageAnchor, type UsageAnchor, type WorkingMeasurement } from './working-context.ts';
 import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
@@ -61,7 +61,7 @@ interface Attempt {
     proposedRetiredIds?: string[];
     workingContext?: UsageRecord['workingContext'];
     deferral?: {
-      reason: 'pair-cap' | 'batch-cap' | 'accounted-judge-failure';
+      reason: JevInputLimitError['reason'] | 'accounted-judge-failure';
       unjudgedCandidateIds: string[];
       input?: JevInputLimitError['input'];
     };
@@ -201,40 +201,49 @@ export function createContextExtension(manager: SessionManager, options: Context
           let relevance: Record<string, number> = {};
           let deferral: NonNullable<Attempt['reconsideration']>['deferral'];
           if ((options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
-            let prepared: ReturnType<typeof prepareJevRequest> | undefined;
+            let batches: ReturnType<typeof prepareJevRequests> | undefined;
             try {
-              prepared = prepareJevRequest(plan, messages, ctx.model.api);
+              batches = prepareJevRequests(plan, messages, ctx.model.api);
             } catch (error) {
               if (!(error instanceof JevInputLimitError) || options.policy !== 'jev-select-v1' || !plan.before.fits) throw error;
               deferral = { reason: error.reason, input: error.input, unjudgedCandidateIds: order };
             }
-            if (prepared) {
+            const deadline = performance.now() + options.jev.timeoutMs;
+            for (const [batchIndex, prepared] of (batches ?? []).entries()) {
+              signal.throwIfAborted();
+              const timeoutMs = Math.floor(deadline - performance.now());
+              if (timeoutMs < 1) throw new JevError('Jev decision deadline exceeded');
+              const batchIdentity = { batchIndex, batchCount: batches!.length };
               pi.appendEntry(JUDGE_START_ENTRY, {
                 version: 1, requestId: current.id, sourceLeafId: current.leafId,
                 policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION, stateProviderApi: ctx.model.api,
                 endpoint: options.jev.endpoint ?? JEV_ENDPOINT,
-                candidateIds: order, retireBelow: options.jev.retireBelow, timeoutMs: options.jev.timeoutMs,
+                ...batchIdentity, candidateIds: Object.keys(prepared.request.questions),
+                retireBelow: options.jev.retireBelow, timeoutMs,
                 requestBytes: prepared.requestBytes, maxPairBytes: prepared.maxPairBytes, stateBytes: prepared.stateBytes,
                 omittedObservations: prepared.omittedObservations,
                 requestHash: prepared.requestHash, priceSchedule: JEV_PRICE,
                 ...(current.reconsideration && { reconsideration: current.reconsideration }),
               });
               current.leafId = ctx.sessionManager.getLeafId();
-              const judged = await evaluateJev(prepared.request, options.jev, signal);
+              const judged = await evaluateJev(prepared.request, { ...options.jev, timeoutMs }, signal);
               if (!sameBranch(ctx, current)) throw new Error('Session branch changed during Jev evaluation');
-              pi.appendEntry(JUDGE_RESULT_ENTRY, { version: 1, requestId: current.id, ...judged });
+              pi.appendEntry(JUDGE_RESULT_ENTRY, { version: 1, requestId: current.id, ...batchIdentity, ...judged });
               current.leafId = ctx.sessionManager.getLeafId();
               signal.throwIfAborted();
               if (judged.outcome !== 'ok' || !judged.relevance) {
                 if (options.policy !== 'jev-select-v1' || !plan.before.fits || judged.pricedCostUsd === null || judged.outcome === 'cancelled') {
                   throw new JevError(`Jev evaluation failed (${judged.outcome})`);
                 }
-                deferral = { reason: 'accounted-judge-failure', unjudgedCandidateIds: order };
-              } else {
-                relevance = judged.relevance;
-                order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
-                  .sort((a, b) => relevance[a]! - relevance[b]!);
+                deferral = { reason: 'accounted-judge-failure', unjudgedCandidateIds: order.filter((id) => !(id in relevance)) };
+                break;
               }
+              if (performance.now() >= deadline) throw new JevError('Jev decision deadline exceeded');
+              Object.assign(relevance, judged.relevance);
+            }
+            if (batches && !deferral) {
+              order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
+                .sort((a, b) => relevance[a]! - relevance[b]!);
             }
           }
           const proposal = deferral

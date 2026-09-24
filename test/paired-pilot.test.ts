@@ -38,14 +38,14 @@ test('paired protocol freezes six task transitions with identical candidate ques
     }
   }
   assert.deepEqual({ changed, stable, positiveFirst, positiveSecond }, { changed: 8, stable: 4, positiveFirst: 5, positiveSecond: 5 });
-  assert.equal(plan.promptVersion, 'unfinished-task-v2');
+  assert.equal(plan.promptVersion, 'unfinished-task-v3');
   assert.deepEqual(pilotPlan().fixtures.map((fixture) => fixture.requestHash), [
-    'ff347a93015a32b2dcec69a1964c21a1e94225771934ff94884139d76ec34749',
-    '34d0baafa2ce8151f435538f946209d261d7f2705d0c841b44d5c99fcc67c565',
-    'b7f109ecec3c13068cb4dc86088765e0cdaeceef425cd2bf49b4816f5cbccede',
-    'e304e8da0f5c85279061282f14a9dc6bd39c29cc73b89d5aa63d7b7cb0df522a',
-    '9af3cddf41e81bd7c9ec336a4a5a632352e9e97525502b64e8e3e535ff62ac55',
-    '3d0e99eaa8255b6d85793a72775800a06d23893a4c84241b14974699953e4a64',
+    '84e6cf944f97d8760dab579e69018c50bcdb1563acda2166e689c7510f4f9796',
+    '71f9a75280d033e964ca95e056332219083aba18347552bb333303043f72d856',
+    '4c12b6cef746582db534d2b0e455da54949473457e3ea343a2de4dd7b6493eb1',
+    'c1c2ff85d20e5cc6692f0d3ba8aa5922b3d51fc3d829506f7d2d58b858bee604',
+    '674ae737ce1abc41d4869a383ba33543baa75d3daa634a71816d13cae8477597',
+    'b1435ca2f1a370956137d52b15fb8ef7d487f5a989d1372cdecd26e7e7c637f7',
   ]);
 });
 
