@@ -6,7 +6,7 @@ import { measureRequest, type BudgetMeasurement, type RequestBudget } from './bu
 import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
-import { prepareJevRequest } from './judge-state.ts';
+import { JevInputLimitError, prepareJevRequest } from './judge-state.ts';
 import { mapProviderEvidence } from './provider-view.ts';
 import { evaluateJev, JevError, JEV_ENDPOINT, JEV_MODEL, JEV_PRICE, JEV_PROMPT_VERSION, validateJevConfig, type JevConfig } from './jev.ts';
 import {
@@ -59,6 +59,11 @@ interface Attempt {
     restoredIds?: string[];
     proposedRetiredIds?: string[];
     workingContext?: UsageRecord['workingContext'];
+    deferral?: {
+      reason: 'pair-cap' | 'batch-cap' | 'accounted-judge-failure';
+      unjudgedCandidateIds: string[];
+      input?: JevInputLimitError['input'];
+    };
   };
   budget?: BudgetMeasurement;
   workingContext?: UsageRecord['workingContext'];
@@ -181,33 +186,49 @@ export function createContextExtension(manager: SessionManager, options: Context
           current.budget = plan.before;
           let order = plan.candidates.map((candidate) => candidate.evidence.id);
           let relevance: Record<string, number> = {};
+          let deferral: NonNullable<Attempt['reconsideration']>['deferral'];
           if ((options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
-            const prepared = prepareJevRequest(plan, messages, ctx.model.api);
-            pi.appendEntry(JUDGE_START_ENTRY, {
-              version: 1, requestId: current.id, sourceLeafId: current.leafId,
-              policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION, stateProviderApi: ctx.model.api,
-              endpoint: options.jev.endpoint ?? JEV_ENDPOINT,
-              candidateIds: order, retireBelow: options.jev.retireBelow, timeoutMs: options.jev.timeoutMs,
-              requestBytes: prepared.requestBytes, maxPairBytes: prepared.maxPairBytes,
-              requestHash: prepared.requestHash, priceSchedule: JEV_PRICE,
-              ...(current.reconsideration && { reconsideration: current.reconsideration }),
-            });
-            current.leafId = ctx.sessionManager.getLeafId();
-            const judged = await evaluateJev(prepared.request, options.jev, signal);
-            if (!sameBranch(ctx, current)) throw new Error('Session branch changed during Jev evaluation');
-            pi.appendEntry(JUDGE_RESULT_ENTRY, { version: 1, requestId: current.id, ...judged });
-            current.leafId = ctx.sessionManager.getLeafId();
-            signal.throwIfAborted();
-            if (judged.outcome !== 'ok' || !judged.relevance) {
-              throw new JevError(`Jev evaluation failed (${judged.outcome})`);
+            let prepared: ReturnType<typeof prepareJevRequest> | undefined;
+            try {
+              prepared = prepareJevRequest(plan, messages, ctx.model.api);
+            } catch (error) {
+              if (!(error instanceof JevInputLimitError) || options.policy !== 'jev-select-v1' || !plan.before.fits) throw error;
+              deferral = { reason: error.reason, input: error.input, unjudgedCandidateIds: order };
             }
-            relevance = judged.relevance;
-            order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
-              .sort((a, b) => relevance[a]! - relevance[b]!);
+            if (prepared) {
+              pi.appendEntry(JUDGE_START_ENTRY, {
+                version: 1, requestId: current.id, sourceLeafId: current.leafId,
+                policy: options.policy, model: JEV_MODEL, promptVersion: JEV_PROMPT_VERSION, stateProviderApi: ctx.model.api,
+                endpoint: options.jev.endpoint ?? JEV_ENDPOINT,
+                candidateIds: order, retireBelow: options.jev.retireBelow, timeoutMs: options.jev.timeoutMs,
+                requestBytes: prepared.requestBytes, maxPairBytes: prepared.maxPairBytes, stateBytes: prepared.stateBytes,
+                omittedObservations: prepared.omittedObservations,
+                requestHash: prepared.requestHash, priceSchedule: JEV_PRICE,
+                ...(current.reconsideration && { reconsideration: current.reconsideration }),
+              });
+              current.leafId = ctx.sessionManager.getLeafId();
+              const judged = await evaluateJev(prepared.request, options.jev, signal);
+              if (!sameBranch(ctx, current)) throw new Error('Session branch changed during Jev evaluation');
+              pi.appendEntry(JUDGE_RESULT_ENTRY, { version: 1, requestId: current.id, ...judged });
+              current.leafId = ctx.sessionManager.getLeafId();
+              signal.throwIfAborted();
+              if (judged.outcome !== 'ok' || !judged.relevance) {
+                if (options.policy !== 'jev-select-v1' || !plan.before.fits || judged.pricedCostUsd === null || judged.outcome === 'cancelled') {
+                  throw new JevError(`Jev evaluation failed (${judged.outcome})`);
+                }
+                deferral = { reason: 'accounted-judge-failure', unjudgedCandidateIds: order };
+              } else {
+                relevance = judged.relevance;
+                order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
+                  .sort((a, b) => relevance[a]! - relevance[b]!);
+              }
+            }
           }
-          const proposal = selectionPlan && options.policy === 'jev-select-v1'
-            ? applySelection(selectionPlan, relevance, options.jev.retireBelow, options.selection.restoreAtOrAbove, ctx.model, options.budget)
-            : { ...applyRetirement(plan, order, ctx.model, options.budget), restoredIds: [], workingBudget: undefined };
+          const proposal = deferral
+            ? { payload, budget: plan.before, retiredIds: history.retiredIds, restoredIds: [], workingBudget: selectionPlan?.workingBefore }
+            : selectionPlan && options.policy === 'jev-select-v1'
+              ? applySelection(selectionPlan, relevance, options.jev.retireBelow, options.selection.restoreAtOrAbove, ctx.model, options.budget)
+              : { ...applyRetirement(plan, order, ctx.model, options.budget), restoredIds: [], workingBudget: undefined };
           if (proposal.workingBudget && options.policy === 'jev-select-v1') {
             current.workingContext = { ...proposal.workingBudget, configuredLimit: options.selection.workingContextLimit ?? null };
           }
@@ -217,6 +238,7 @@ export function createContextExtension(manager: SessionManager, options: Context
             current.reconsideration = { ...current.reconsideration,
               restoredIds: proposal.restoredIds, proposedRetiredIds: proposal.retiredIds,
               workingContext: current.workingContext,
+              ...(deferral && { deferral }),
             };
           }
           if (checkpoint || JSON.stringify([...proposal.retiredIds].sort()) !== JSON.stringify([...history.retiredIds].sort())) {

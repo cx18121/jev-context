@@ -26,7 +26,7 @@ export function validateSelectionConfig(config: SelectionConfig, retireBelow: nu
   }
 }
 
-/** A successful no-op selection is also a branch-owned event checkpoint. */
+/** Selections, including no-ops and safe deferrals, checkpoint branch-owned events. */
 export function selectionEvents(branch: SessionEntry[], history: HistoryView) {
   const checkpoint = history.lastSelection?.policy === SELECTION_POLICY
     ? branch.findLastIndex((entry) => entry.type === 'custom' && entry.customType === SELECTION_ENTRY) : -1;

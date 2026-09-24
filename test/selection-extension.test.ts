@@ -167,7 +167,7 @@ test('a same-size swap is committed, while a selected restoration that cannot fi
   } finally { await judge.close(); await fixture.close(); }
 });
 
-test('oversized archived evidence and failed judges explicitly stop fitting requests without a checkpoint', async () => {
+test('oversized archived evidence defers, but unknown judge cost still stops a fitting request', async () => {
   const fixture = await createPiFixture();
   const judge = await createJevFixture();
   try {
@@ -177,13 +177,17 @@ test('oversized archived evidence and failed judges explicitly stop fitting requ
       judge.respond(() => ({ status: 529, body: { error: 'Unavailable' } }));
       const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-select-v1', budget: roomy, jev: judge.config, selection })], manager);
       await run.session.prompt('Continue.');
-      assert.equal(data(manager, SELECTION_ENTRY).length, 1);
-      assert.equal(data<{ kind: string }>(manager, STOP_ENTRY)[0]!.kind, 'judge');
+      assert.equal(data(manager, SELECTION_ENTRY).length, oversized ? 2 : 1);
+      if (oversized) {
+        assert.equal(data(manager, STOP_ENTRY).length, 0);
+        assert.match(tool(fixture.requests[0]!, 'a'), /retired observation/);
+        assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 1);
+      } else assert.equal(data<{ kind: string }>(manager, STOP_ENTRY)[0]!.kind, 'judge');
       assert.equal(data(manager, JUDGE_START_ENTRY).length, oversized ? 0 : 1);
       assert.deepEqual(run.errors, []);
     }
     assert.equal(judge.requests.length, 1);
-    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.requests.length, 1);
   } finally { await judge.close(); await fixture.close(); }
 });
 

@@ -99,6 +99,48 @@ test('real Codex selector retires, restores, resumes, preserves reasoning and ex
   } finally { await judge.close(); await f.close(); }
 });
 
+test('Codex two-read regression bounds judge context and defers an accounted failure without changing the wire', async () => {
+  for (const failedJudge of [false, true]) {
+    const f = await createCodexFixture();
+    const judge = await createJevFixture();
+    try {
+      const manager = SessionManager.create(f.directory);
+      manager.appendMessage({ role: 'user', content: 'Fix the product implementation and preserve the API.', timestamp: 1 });
+      const ids = ['source', 'tests'].map((id, index) => {
+        const call = { type: 'toolCall' as const, id: `${id}|fc_${id}`, name: 'read', arguments: { path: `${id}.py` } };
+        manager.appendMessage({ ...assistant([call]), api: f.model.api, provider: f.model.provider, model: f.model.id,
+          content: [{ type: 'thinking', thinking: '', thinkingSignature: JSON.stringify({ ...seedReasoning, id: `rs_${id}` }) }, call] });
+        return manager.appendMessage(result(call.id, (index === 0 ? 's' : 't').repeat(index === 0 ? 16927 : 11413)));
+      });
+      judge.respond((request) => ({ body: failedJudge ? { ...jevResponse(request), answers: {} } : jevResponse(request) }));
+      let originalPayload: unknown;
+      const run = await f.session((m) => [
+        (pi) => { pi.on('before_provider_request', (event) => { originalPayload = structuredClone(event.payload); }); },
+        createContextExtension(m, { policy: 'jev-select-v1', budget, selection, jev: judge.config }),
+      ], manager);
+      await run.session.prompt('Continue.');
+      assert.equal(f.requests.length, 1, JSON.stringify(records(manager, STOP_ENTRY)));
+      assert.equal(judge.requests.length, 1);
+      assert.deepEqual(Object.keys(judge.requests[0]!.questions), [ids[0]]);
+      assert.deepEqual(records<{ omittedObservations: Array<{ evidenceId: string }> }>(manager, JUDGE_START_ENTRY)[0]!
+        .omittedObservations.map((item) => item.evidenceId), [ids[1]]);
+      assert.deepEqual(stableItems(f.requests[0]!), stableItems(originalPayload as CodexRequest));
+      assert.equal(output(f.requests[0]!, 'tests').output, 't'.repeat(11413));
+      if (failedJudge) {
+        assert.deepEqual(f.requests[0], originalPayload);
+        assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 0);
+        const checkpoint = records<{ reconsideration: { deferral: { reason: string } } }>(manager, SELECTION_ENTRY)[0]!;
+        assert.equal(checkpoint.reconsideration.deferral.reason, 'accounted-judge-failure');
+      } else {
+        assert.match(String(output(f.requests[0]!, 'source').output), /retired observation/);
+        assert.equal(manager.getBranch().filter((entry) => entry.type === 'context_edit').length, 1);
+      }
+      assert.equal(records(manager, STOP_ENTRY).length, 0);
+      assert.deepEqual(run.errors, []);
+    } finally { await judge.close(); await f.close(); }
+  }
+});
+
 test('Codex grammar output uses the same exact retirement mapping through the real serializer', async () => {
   const f = await createCodexFixture();
   try {

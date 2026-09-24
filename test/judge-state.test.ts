@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { Model } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { readHistory, buildView } from '../src/history.ts';
-import { prepareJevRequest, JEV_PAIR_BYTES, JEV_REQUEST_BYTES } from '../src/judge-state.ts';
+import { JevInputLimitError, prepareJevRequest, JEV_PAIR_BYTES, JEV_REQUEST_BYTES } from '../src/judge-state.ts';
 import { prepareRetirement } from '../src/retirement.ts';
 import { appendExchange, assistant, result } from './history-fixture.ts';
 
@@ -68,7 +68,13 @@ test('large task state or a large whole candidate fails without clipping either'
     appendExchange(manager, [result('old', oversized === 'candidate' ? 'observation'.repeat(4000) : 'data'.repeat(200))]);
     appendExchange(manager, [result('new', 'protected')]);
     const fixture = prepared(manager);
-    assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages, model.api), /state plus a whole candidate/);
+    assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages, model.api), (error: unknown) => {
+      assert.ok(error instanceof JevInputLimitError);
+      assert.equal(error.reason, 'pair-cap');
+      assert.ok(error.input.maxPairBytes > JEV_PAIR_BYTES);
+      assert.ok(error.input.stateBytes > 0);
+      return true;
+    });
   }
 });
 
@@ -78,5 +84,68 @@ test('a full batch that exceeds the total cap fails instead of judging a partial
   appendExchange(manager, [result('new', 'protected')]);
   const fixture = prepared(manager);
   assert.equal(fixture.plan.candidates.length, 60);
-  assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages, model.api), /Full Jev candidate batch/);
+  assert.throws(() => prepareJevRequest(fixture.plan, fixture.messages, model.api), (error: unknown) => {
+    assert.ok(error instanceof JevInputLimitError);
+    assert.equal(error.reason, 'batch-cap');
+    assert.ok(error.input.requestBytes > JEV_REQUEST_BYTES);
+    assert.ok(error.input.maxPairBytes <= JEV_PAIR_BYTES);
+    return true;
+  });
+});
+
+function assertSizes(prepared: ReturnType<typeof prepareJevRequest>) {
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  assert.equal(prepared.requestBytes, bytes(prepared.request));
+  assert.equal(prepared.stateBytes, bytes(prepared.request.state));
+  assert.equal(prepared.maxPairBytes, Math.max(...Object.values(prepared.request.questions)
+    .map((question) => bytes({ state: prepared.request.state, question }))));
+  assert.ok(prepared.requestBytes <= JEV_REQUEST_BYTES && prepared.maxPairBytes <= JEV_PAIR_BYTES);
+}
+
+test('two source reads fit by explicitly omitting contextual bodies, never whole candidates or instructions', () => {
+  const manager = SessionManager.inMemory();
+  manager.appendMessage({ role: 'user', content: 'Fix products without changing the public API.', timestamp: 1 });
+  const [old] = appendExchange(manager, [result('source', 's'.repeat(16927))]);
+  const [latest] = appendExchange(manager, [result('tests', 't'.repeat(11413))]);
+  const fixture = prepared(manager);
+  const original = structuredClone(fixture);
+  const bounded = prepareJevRequest(fixture.plan, fixture.messages, model.api);
+  assert.deepEqual(fixture, original);
+  assert.deepEqual(Object.keys(bounded.request.questions), [old]);
+  assert.equal((bounded.request.questions[old!]!.instructions.candidate as { observation: string }).observation, 's'.repeat(16927));
+  assert.match(JSON.stringify(bounded.request.state), /without changing the public API/);
+  assert.match(JSON.stringify(bounded.request.state), /omitted-for-judge-budget/);
+  assert.doesNotMatch(JSON.stringify(bounded.request.state), /tttt/);
+  assert.deepEqual(bounded.omittedObservations.map((item) => item.evidenceId), [latest]);
+  assert.equal(bounded.omittedObservations[0]!.contentBytes, Buffer.byteLength(JSON.stringify([{ type: 'text', text: 't'.repeat(11413) }])));
+  assertSizes(bounded);
+});
+
+test('context packing is a whole-body newest-first prefix and counts escaped UTF-8 JSON exactly', () => {
+  const manager = SessionManager.inMemory();
+  manager.appendMessage({ role: 'user', content: 'Preserve the Unicode API.', timestamp: 1 });
+  appendExchange(manager, [result('candidate', 'data'.repeat(200))]);
+  const ids = appendExchange(manager, [
+    result('old-small', 'older body'),
+    result('middle-large', '不可分割"\\\n'.repeat(4000)),
+    result('new-small', '新しい"\\\n'.repeat(50)),
+  ]);
+  const fixture = prepared(manager);
+  const bounded = prepareJevRequest(fixture.plan, fixture.messages, model.api);
+  assert.deepEqual(bounded.omittedObservations.map((item) => item.evidenceId), ids.slice(0, 2));
+  const state = bounded.request.state as { conversation: Array<{ evidenceId?: string; content: unknown }> };
+  assert.deepEqual(state.conversation.find((entry) => entry.evidenceId === ids[2])!.content,
+    [{ type: 'text', text: '新しい"\\\n'.repeat(50) }]);
+  assertSizes(bounded);
+});
+
+test('batch headroom also bounds contextual admission even when each pair would fit', () => {
+  const manager = SessionManager.inMemory();
+  for (let i = 0; i < 12; i++) appendExchange(manager, [result(`candidate${i}`, 'whole'.repeat(500))]);
+  const [latest] = appendExchange(manager, [result('latest', 'context'.repeat(2500))]);
+  const fixture = prepared(manager);
+  const bounded = prepareJevRequest(fixture.plan, fixture.messages, model.api);
+  assert.equal(Object.keys(bounded.request.questions).length, 12);
+  assert.deepEqual(bounded.omittedObservations.map((item) => item.evidenceId), [latest]);
+  assertSizes(bounded);
 });

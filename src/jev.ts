@@ -1,6 +1,6 @@
 export const JEV_MODEL = 'jev-1.13.0';
 export const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
-export const JEV_PROMPT_VERSION = 'unfinished-task-v1';
+export const JEV_PROMPT_VERSION = 'unfinished-task-v2';
 export const JEV_PRICE = {
   inputUsdPerMillion: 0.042, outputUsdPerMillion: 0,
   source: 'https://docs.typesafe.ai/models', checkedOn: '2026-09-21',
