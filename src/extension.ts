@@ -6,7 +6,8 @@ import { measureRequest, type BudgetMeasurement, type RequestBudget } from './bu
 import { applyRetirement, prepareRetirement } from './retirement.ts';
 import { retrieveArchive, RETRIEVAL_VERSION } from './retrieval.ts';
 import { applySelection, prepareSelection, selectionEvents, validateSelectionConfig, type SelectionConfig } from './selection.ts';
-import { planJevSelection, prepareJevRequests, type UnjudgedCandidate } from './judge-state.ts';
+import { JEV_BRIEF_PROMPT_VERSION, planJevSelection, prepareJevRequests, type UnjudgedCandidate } from './judge-state.ts';
+import { JudgeSchedule, judgmentHash } from './judge-schedule.ts';
 import { mapProviderEvidence, providerInstructions } from './provider-view.ts';
 import { BRIEF_ENTRY, BRIEF_SOURCE_ENTRY, BRIEF_START_ENTRY, BRIEF_RESULT_ENTRY, taskSources,
   updateBrief, validateBriefConfig, type BriefConfig, type BriefResult } from './brief-session.ts';
@@ -63,6 +64,7 @@ interface Attempt {
     restoredIds?: string[];
     skippedRestoreIds?: string[];
     unjudged?: UnjudgedCandidate[];
+    skippedKeepIds?: string[];
     proposedRetiredIds?: string[];
     workingContext?: UsageRecord['workingContext'];
     deferral?: {
@@ -70,6 +72,7 @@ interface Attempt {
       unjudgedCandidateIds: string[];
     };
   };
+  recordKeeps?: () => void;
   budget?: BudgetMeasurement;
   workingContext?: UsageRecord['workingContext'];
   sent?: { payload: unknown; model: Model<Api> };
@@ -94,6 +97,8 @@ export function createContextExtension(manager: SessionManager, options: Context
   return (pi) => {
     let attempt: Attempt | undefined;
     let writeFailed = false;
+    const judgeSchedule = new JudgeSchedule();
+    let scheduleLeaf: { sessionId: string; leafId: string | null } | undefined;
     let anchor: { usage: UsageAnchor; sessionId: string; leafId: string | null; assistantHash: string } | undefined;
     const assistantHash = (message: AssistantMessage) => createHash('sha256').update(JSON.stringify(message)).digest('hex');
 
@@ -103,6 +108,7 @@ export function createContextExtension(manager: SessionManager, options: Context
     }
 
     function stop(ctx: ExtensionContext, current: Attempt, reason: string, kind?: 'judge') {
+      judgeSchedule.clear();
       current.stopped = true;
       current.cancelled = ctx.signal?.aborted ?? false;
       ctx.abort();
@@ -191,12 +197,19 @@ export function createContextExtension(manager: SessionManager, options: Context
         if (!sameBranch(ctx, current)) throw new Error('Context extension is bound to a different session manager');
         signal.throwIfAborted();
         const branch = ctx.sessionManager.getBranch();
+        if (scheduleLeaf && (scheduleLeaf.sessionId !== current.sessionId || !branch.some((entry) => entry.id === scheduleLeaf!.leafId))) {
+          judgeSchedule.clear();
+          scheduleLeaf = undefined;
+        }
         if (anchor) {
           const index = branch.findIndex((entry) => entry.id === anchor!.leafId);
           const responses = branch.slice(index + 1).flatMap((entry) =>
             entry.type === 'message' && entry.message.role === 'assistant' ? [entry.message] : []);
           if (anchor.sessionId !== current.sessionId || index < 0 || responses.length !== 1 ||
-              assistantHash(responses[0]!) !== anchor.assistantHash) anchor = undefined;
+              assistantHash(responses[0]!) !== anchor.assistantHash) {
+            anchor = undefined;
+            judgeSchedule.clear();
+          }
         }
         const history = readHistory(structuredClone(branch), event.messages);
         const proposed = options.policy === 'scripted-v1' && options.select
@@ -272,11 +285,19 @@ export function createContextExtension(manager: SessionManager, options: Context
           current.budget = plan.before;
           let order = plan.candidates.map((candidate) => candidate.evidence.id);
           let relevance: Record<string, number> = {};
+          const scheduleContext = selectionPlan && brief && options.policy === 'jev-select-v1' ? judgmentHash({
+            brief, promptVersion: JEV_BRIEF_PROMPT_VERSION, judge: JEV_MODEL,
+            endpoint: options.jev.endpoint ?? JEV_ENDPOINT, retireBelow: options.jev.retireBelow,
+            selection: options.selection, model: ctx.model, budget: options.budget,
+          }) : undefined;
+          const scheduled = selectionPlan && scheduleContext ? judgeSchedule.select(selectionPlan, scheduleContext) : undefined;
+          if (current.reconsideration && scheduled) current.reconsideration.skippedKeepIds = scheduled.skippedIds;
+          const judgePlan = scheduled ? { ...plan, candidates: scheduled.candidates } : plan;
           let deferral: NonNullable<Attempt['reconsideration']>['deferral'] = briefNeeded && !brief
             ? { reason: 'task-brief-pending', unjudgedCandidateIds: order } : undefined;
-          if (!deferral && (options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && order.length) {
-            const preparedSelection = selectionPlan ? planJevSelection(plan, messages, ctx.model.api, brief!) : undefined;
-            const batches = preparedSelection?.batches ?? prepareJevRequests(plan, messages, ctx.model.api);
+          if (!deferral && (options.policy === 'jev-v1' || options.policy === 'jev-select-v1') && judgePlan.candidates.length) {
+            const preparedSelection = selectionPlan ? planJevSelection(judgePlan, messages, ctx.model.api, brief!) : undefined;
+            const batches = preparedSelection?.batches ?? prepareJevRequests(judgePlan, messages, ctx.model.api);
             if (current.reconsideration && preparedSelection) current.reconsideration.unjudged = preparedSelection.unjudged;
             const deadline = performance.now() + options.jev.timeoutMs;
             for (const [batchIndex, prepared] of batches.entries()) {
@@ -305,7 +326,7 @@ export function createContextExtension(manager: SessionManager, options: Context
                 if (options.policy !== 'jev-select-v1' || !plan.before.fits || judged.pricedCostUsd === null || judged.outcome === 'cancelled') {
                   throw new JevError(`Jev evaluation failed (${judged.outcome})`);
                 }
-                deferral = { reason: 'accounted-judge-failure', unjudgedCandidateIds: order.filter((id) => !(id in relevance)) };
+                deferral = { reason: 'accounted-judge-failure', unjudgedCandidateIds: judgePlan.candidates.map((candidate) => candidate.evidence.id).filter((id) => !(id in relevance)) };
                 break;
               }
               if (performance.now() >= deadline) throw new JevError('Jev decision deadline exceeded');
@@ -315,6 +336,11 @@ export function createContextExtension(manager: SessionManager, options: Context
               order = order.filter((id) => relevance[id]! < options.jev.retireBelow)
                 .sort((a, b) => relevance[a]! - relevance[b]!);
             }
+          }
+          if (deferral) judgeSchedule.clear();
+          else if (selectionPlan && scheduleContext && options.policy === 'jev-select-v1') {
+            const completedPlan = selectionPlan, cutoff = options.jev.retireBelow;
+            current.recordKeeps = () => judgeSchedule.record(completedPlan, scheduleContext, relevance, cutoff);
           }
           const proposal = deferral
             ? { payload, budget: plan.before, retiredIds: history.retiredIds, restoredIds: [], skippedRestoreIds: [], workingBudget: selectionPlan?.workingBefore }
@@ -344,6 +370,8 @@ export function createContextExtension(manager: SessionManager, options: Context
         if (current.selection) {
           try {
             commitSelection(manager, current.selection, options.policy, current.reconsideration);
+            current.recordKeeps?.();
+            scheduleLeaf = { sessionId: current.sessionId, leafId: manager.getLeafId() };
           } catch (error) {
             writeFailed = true;
             throw error;
@@ -368,8 +396,10 @@ export function createContextExtension(manager: SessionManager, options: Context
       const current = attempt;
       attempt = undefined;
       anchor = undefined;
-      if (writeFailed || !sameBranch(ctx, current)) return;
+      if (writeFailed || !sameBranch(ctx, current)) { judgeSchedule.clear(); return; }
       const message = event.message;
+      if (current.stopped || ctx.signal?.aborted || !current.responseReceived ||
+          (message.stopReason !== 'stop' && message.stopReason !== 'toolUse')) judgeSchedule.clear();
       pi.appendEntry(USAGE_ENTRY, {
         version: 1, requestId: current.id,
         provider: message.provider, model: message.model,
