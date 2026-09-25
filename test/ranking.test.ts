@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { rankJev, JEV_MODEL, type JevRequest, type JevScoreQuestion, type JevRankingResult } from '../src/jev.ts';
-import { collectRanking, planRanking, PRIORITY_LEVELS, type RankingCandidate, type RankingLimits } from '../src/ranking.ts';
+import { CALL_CONTEXT_BYTES, collectRanking, planRanking, PRIORITY_LEVELS, type RankingCandidate, type RankingLimits } from '../src/ranking.ts';
 import { createJevFixture } from './jev-fixture.ts';
 
 const limits: RankingLimits = { maxPairBytes: 6000, maxRequestBytes: 12000, maxRequests: 8, maxSegments: 64,
@@ -114,6 +114,30 @@ test('segmentation covers complete arguments and observation with exact Unicode-
   assert.deepEqual(planRanking(state, [item], [], { ...limits, maxRequests: 30, maxDurationMs: 30_000 }), plan);
 });
 
+test('observation questions carry call arguments, and only long arguments get their own ranges', () => {
+  const questions = (plan: ReturnType<typeof planRanking>) => plan.batches.flatMap((batch) => Object.values(batch.request.questions))
+    .map((question) => (question.instructions as { candidate: Record<string, unknown> }).candidate);
+  const short = planRanking(state, [candidate('short', 'line\n'.repeat(3000))], [], { ...limits, maxRequests: 30, maxDurationMs: 30_000 });
+  assert.ok(short.segments.length > 1);
+  assert.ok(short.segments.every((segment) => segment.source === 'observation'));
+  for (const fragment of questions(short)) {
+    assert.deepEqual(fragment.callArguments, { text: '{"path":"/testbed/source.ts"}', complete: true, length: 29 });
+  }
+
+  const item = candidate('long');
+  item.toolCall.arguments = { command: '漢'.repeat(1000) };
+  const serialized = JSON.stringify(item.toolCall.arguments);
+  const long = planRanking(state, [item], [], limits);
+  assert.ok(long.segments.some((segment) => segment.source === 'arguments'));
+  const observation = questions(long).find((fragment) => fragment.source === 'observation')!;
+  const context = observation.callArguments as { text: string; complete: boolean; length: number };
+  assert.equal(context.complete, false);
+  assert.equal(context.length, serialized.length);
+  assert.ok(serialized.startsWith(context.text) && context.text.isWellFormed());
+  assert.ok(Buffer.byteLength(context.text) <= CALL_CONTEXT_BYTES && Buffer.byteLength(context.text) > CALL_CONTEXT_BYTES - 3);
+  assert.ok(questions(long).filter((fragment) => fragment.source === 'arguments').every((fragment) => !('callArguments' in fragment)));
+});
+
 test('mandatory limits fail before dispatch planning and optional archives roll back whole without blocking later small items', () => {
   const large = candidate('large', 'x'.repeat(50_000));
   const tight = { ...limits, maxSegments: 4 };
@@ -125,8 +149,8 @@ test('mandatory limits fail before dispatch planning and optional archives roll 
   assert.equal(plan.outcome, 'ready');
   assert.deepEqual(plan.candidateIds, ['resident', 'small']);
   assert.deepEqual(plan.omittedArchiveIds, ['large']);
-  assert.equal(plan.segments.length, 4);
-  assert.deepEqual(plan.segments.map((segment) => segment.questionId), ['s0', 's1', 's2', 's3']);
+  assert.equal(plan.segments.length, 2);
+  assert.deepEqual(plan.segments.map((segment) => segment.questionId), ['s0', 's1']);
 });
 
 test('the entire decision includes per-request state, request count, spend reservation and serial timeout envelope', () => {

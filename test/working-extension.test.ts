@@ -183,7 +183,7 @@ for (const failure of ['ranking-limit', 'unknown-sketch-cost'] as const) {
       f.options.order = { kind: 'capture-order' };
       const manager = SessionManager.inMemory(f.pi.directory);
       seed(manager, false, 14000);
-      if (failure === 'ranking-limit') f.options.ranking.maxSegments = 1;
+      if (failure === 'ranking-limit') f.options.ranking.maxInputBytes = 1;
       else f.options.sketch.complete = async () => assistant();
       const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
       await run.session.prompt('Finish invoice API contract.');
@@ -231,7 +231,7 @@ for (const failure of ['pending-sketch', 'ranking-limit', 'known-judge-failure']
       const { old } = seed(manager, true, 2500);
       if (failure === 'pending-sketch') f.options.sketch.complete = async () => ({ ...assistant(), content: [{ type: 'text', text: '{}' }],
         usage: { ...zeroUsage(), input: 80, output: 4, totalTokens: 84 } });
-      if (failure === 'ranking-limit') f.options.ranking.maxSegments = 1;
+      if (failure === 'ranking-limit') f.options.ranking.maxInputBytes = 1;
       if (failure === 'known-judge-failure') f.judge.respond((request) => ({ body: { ...scoreResponse(request), answers: {} } }));
       const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
       await run.session.prompt('Finish the invoice API.');

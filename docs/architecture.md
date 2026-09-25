@@ -109,7 +109,7 @@ Capture order uses unique chronological positions, newest first. An archive may 
 
 ### Complete bounded judgments
 
-All eligible residents are mandatory candidates during rebalancing. Archives are optional and enter in retrieval order. The planner splits serialized tool arguments and observation text into exact, contiguous Unicode-safe ranges, preferring line boundaries. Splits affect judge input only. The coding model always receives a whole observation or its stub.
+All eligible residents are mandatory candidates during rebalancing. Archives are optional and enter in retrieval order. The planner splits observation text into exact, contiguous Unicode-safe ranges, preferring line boundaries. Each observation range carries the tool call's serialized arguments as context, up to 2,000 bytes. Longer arguments show that prefix and are also judged in their own ranges, so no argument text goes unjudged. Splits affect judge input only. The coding model always receives a whole observation or its stub.
 
 Every segment of an admitted candidate must fit the configured pair, request, aggregate byte, batch, segment, estimated cost, and duration limits. If mandatory evidence cannot be planned completely, selection is incomplete before any Jev call. Optional archives that cannot be included completely are omitted and recorded. The highest segment priority becomes the observation's priority.
 
