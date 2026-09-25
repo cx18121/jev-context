@@ -105,8 +105,7 @@ test('segmentation covers complete arguments and observation with exact Unicode-
   }
   for (const batch of plan.batches) {
     assert.equal(batch.requestBytes, Buffer.byteLength(JSON.stringify(batch.request)));
-    assert.equal(batch.inputByteReservation, Math.max(batch.requestBytes, Object.values(batch.request.questions)
-      .reduce((sum, question) => sum + Buffer.byteLength(JSON.stringify({ state: batch.request.state, question })), 0)));
+    assert.equal(batch.inputByteReservation, batch.requestBytes);
     assert.ok(batch.requestBytes <= limits.maxRequestBytes);
     for (const question of Object.values(batch.request.questions)) {
       assert.ok(Buffer.byteLength(JSON.stringify({ state: batch.request.state, question })) <= limits.maxPairBytes);
@@ -130,12 +129,12 @@ test('mandatory limits fail before dispatch planning and optional archives roll 
   assert.deepEqual(plan.segments.map((segment) => segment.questionId), ['s0', 's1', 's2', 's3']);
 });
 
-test('the entire decision includes repeated state, request count, spend reservation and serial timeout envelope', () => {
+test('the entire decision includes per-request state, request count, spend reservation and serial timeout envelope', () => {
   const items = [candidate('a', 'x'.repeat(12_000)), candidate('b', 'y'.repeat(12_000))];
   const ready = planRanking(state, items, [], limits);
   assert.equal(ready.outcome, 'ready');
   assert.ok(ready.batches.length > 1);
-  assert.ok(ready.inputByteReservation >= ready.batches.reduce((sum, batch) => sum + batch.requestBytes, 0));
+  assert.equal(ready.inputByteReservation, ready.batches.reduce((sum, batch) => sum + batch.requestBytes, 0));
   const boundary = { ...limits, maxRequests: ready.batches.length, maxSegments: ready.segments.length,
     maxInputBytes: ready.inputByteReservation, maxCostUsd: ready.costReservationUsd, maxDurationMs: ready.durationReservationMs };
   assert.equal(planRanking(state, items, [], boundary).outcome, 'ready');
@@ -185,8 +184,19 @@ test('hundreds of segments retain exact reservations without repeated whole-plan
   assert.equal(plan.candidateIds.length, 300);
   for (const batch of plan.batches) {
     assert.equal(batch.requestBytes, Buffer.byteLength(JSON.stringify(batch.request)));
-    assert.equal(batch.inputByteReservation, Math.max(batch.requestBytes, Object.values(batch.request.questions)
-      .reduce((sum, question) => sum + Buffer.byteLength(JSON.stringify({ state: batch.request.state, question })), 0)));
+    assert.equal(batch.inputByteReservation, batch.requestBytes);
+  }
+});
+
+test('the paired runner limits plan a full resident set of many small results', () => {
+  // Mirrors eval/swebench/run.mjs: about 100KB of residents at the high target, with a maximal sketch.
+  const runner = { maxPairBytes: 30000, maxRequestBytes: 60000, maxRequests: 8, maxSegments: 256,
+    maxInputBytes: 480000, maxCostUsd: 0.1, requestTimeoutMs: 15000, maxDurationMs: 120000 };
+  const full = { taskSketch: 's'.repeat(6000), recentActivity: { text: 'r'.repeat(3800), truncated: true, originalBytes: 9000 } };
+  const line = 'x'.repeat(79) + '\n';
+  for (const [count, bytes] of [[4, 25_000], [25, 4_000], [60, 1_600]] as const) {
+    const items = Array.from({ length: count }, (_, i) => candidate(`r${i}`, line.repeat(bytes / 80)));
+    assert.equal(planRanking(full, items, [], runner).outcome, 'ready', `${count} residents of ${bytes} bytes`);
   }
 });
 

@@ -83,28 +83,26 @@ export function planRanking(
   const emptyRequest = (): JevRequest<JevScoreQuestion> => ({ model: JEV_MODEL, state: fixedState, questions: {} });
   const envelopeBytes = size(emptyRequest());
   const pairEnvelopeBytes = size({ state: fixedState, question: null }) - 4;
-  const batches: Array<{ request: JevRequest<JevScoreQuestion>; requestBytes: number; pairBytes: number }> = [];
+  const batches: Array<{ request: JevRequest<JevScoreQuestion>; requestBytes: number }> = [];
   const segments: RankingSegment[] = [];
   let inputByteReservation = 0;
   const cost = (bytes: number) => bytes * JEV_PRICE.inputUsdPerMillion / 1_000_000;
 
-  // Only the last batch changes. Exact additive JSON sizes avoid reserializing all preceding
-  // questions (and the shared state) for every candidate.
+  // Jev ingests state once per request and bills input tokens, so a batch reserves its serialized
+  // bytes. The per-question state limit is checked separately. Only the last batch changes; exact
+  // additive JSON sizes avoid reserializing all preceding questions for every candidate.
   const add = (segment: RankingSegment, question: JevScoreQuestion) => {
-    const questionBytes = size(question);
-    const entryBytes = size(segment.questionId) + 1 + questionBytes;
+    const entryBytes = size(segment.questionId) + 1 + size(question);
     const last = batches.at(-1);
     const extend = last && last.requestBytes + 1 + entryBytes <= limits.maxRequestBytes;
     const requestBytes = (extend ? last.requestBytes + 1 : envelopeBytes) + entryBytes;
-    const pairBytes = (extend ? last.pairBytes : 0) + pairEnvelopeBytes + questionBytes;
     const count = batches.length + (extend ? 0 : 1);
-    const reserved = inputByteReservation - (extend ? Math.max(last.requestBytes, last.pairBytes) : 0) + Math.max(requestBytes, pairBytes);
+    const reserved = inputByteReservation - (extend ? last.requestBytes : 0) + requestBytes;
     if (requestBytes > limits.maxRequestBytes || count > limits.maxRequests || segments.length >= limits.maxSegments ||
         reserved > limits.maxInputBytes || cost(reserved) > limits.maxCostUsd || count * limits.requestTimeoutMs > limits.maxDurationMs) return false;
-    const batch = extend ? last : { request: emptyRequest(), requestBytes: envelopeBytes, pairBytes: 0 };
+    const batch = extend ? last : { request: emptyRequest(), requestBytes: envelopeBytes };
     batch.request.questions[segment.questionId] = question;
     batch.requestBytes = requestBytes;
-    batch.pairBytes = pairBytes;
     if (!extend) batches.push(batch);
     inputByteReservation = reserved;
     segments.push(segment);
@@ -177,8 +175,8 @@ export function planRanking(
     }
   }
   return { outcome: 'ready', candidateIds: [...new Set(segments.map((segment) => segment.evidenceId))],
-    omittedArchiveIds, segments, batches: batches.map(({ request, requestBytes, pairBytes }) => ({ request, requestBytes,
-      requestHash: digest(request), inputByteReservation: Math.max(requestBytes, pairBytes) })),
+    omittedArchiveIds, segments, batches: batches.map(({ request, requestBytes }) => ({ request, requestBytes,
+      requestHash: digest(request), inputByteReservation: requestBytes })),
     inputByteReservation, costReservationUsd: cost(inputByteReservation), durationReservationMs: batches.length * limits.requestTimeoutMs };
 }
 
