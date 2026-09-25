@@ -3,5 +3,6 @@ coverage/
 .env
 .env.*
 results/
+/DESIGN.md
 __pycache__/
 *.pyc

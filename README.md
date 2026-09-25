@@ -1,12 +1,18 @@
 # jev-context
 
-An experimental context manager for Pi. The goal is to select useful verbatim evidence from preserved session history, reducing total cost without hurting quality or improving quality at an acceptable cost. See [DESIGN.md](DESIGN.md) for the research plan.
+An experimental context manager for [Pi](https://github.com/earendil-works/pi). It selects which tool results remain visible to the coding model while preserving the original session history. Retired results can be restored verbatim without rerunning tools.
 
-This repository contains deterministic and Jev retirement policies plus an experimental automatic retirement-and-restoration policy. Local fixtures test the Pi integration. A [12-request synthetic pilot](docs/synthetic-pilot-v1.md) verified the live Jev contract and basic relevance rankings. A [24-request paired pilot](docs/paired-pilot-v1.md) showed task-sensitive scores but persistent false positives. Neither measured coding-task accuracy or savings. A [Harbor integration smoke](docs/harbor-smoke-v1.md) passed the original benchmark verifier's wrong-answer and correct-answer checks through Pi. It is not installed in your normal Pi setup. Tests need no credentials or paid model calls.
+The goal is to reduce context cost without losing evidence needed to finish the task. The automatic policy uses a bounded task brief, a lexical archive lookup, and Jev relevance judgments to choose what to retire or restore.
+
+## Status
+
+This is research code, not a drop-in extension for everyday Pi use. It runs through an isolated SDK harness with native compaction disabled. The SDK is pinned to 0.87.1. General improvements in task accuracy, cost, or latency have not been established.
+
+Tests cover session persistence, provider payloads, retirement and restoration, and failure handling. The evaluation tools support paired coding runs with native SWE-bench patch grading and ContextBench source-coverage diagnostics. Synthetic fixture results are separate from live task results.
 
 ## Run the checks
 
-Requires Node.js 22.19.0 or newer. The Pi SDK is pinned to 0.87.1.
+Requires Node.js 22.19.0 or newer.
 
 ```sh
 npm ci
@@ -14,222 +20,38 @@ npm run typecheck
 npm test
 ```
 
-Tests start local Completions and Codex HTTP fixtures on `127.0.0.1` and run the actual Pi SDK against it. They use temporary session files, an isolated resource loader, in-memory credentials and settings, and scripted responses. They do not load your extensions, skills, credentials, or session history. Model catalog network refresh is disabled.
+Tests need no credentials, Docker, or paid model calls. They use local HTTP fixtures, temporary sessions, and isolated Pi settings without loading your normal extensions or agent history.
 
-## What exists
+## SDK usage
 
-- `src/history.ts` resolves original observations and validates Pi's branch-local projection. It renders transient proposals and commits accepted changes as native context edits.
-- `src/extension.ts` connects selection to Pi's context and provider hooks. Custom entries record selection checkpoints, explicit stops, and Pi-normalized usage, not a second selected-state store.
-- `src/budget.ts` checks the outgoing text request against a conservative size estimate and records whether its output reserve is a request limit or configured headroom.
-- `src/retirement.ts` prepares the shared candidate pool and applies a retirement ordering to the outgoing payload.
-- `src/judge-state.ts` preserves task instructions and whole candidates, then admits a bounded set of whole contextual tool bodies with explicit omission markers.
-- `src/jev.ts` calls the pinned Jev API once, validates its answers, and captures usage and failure outcomes.
-- `src/retrieval.ts` shortlists archived observations for reconsideration.
-- `src/selection.ts` detects unprocessed user/tool events and assembles atomic retirement-and-restoration proposals.
-- `src/provider-view.ts` verifies evidence mappings and reproduces Pi's text serialization for changed results.
-- `test/` contains unit fixtures and actual SDK lifecycle tests. `test/extension.test.ts` shows how the extension factory is loaded in isolation.
-
-Load the factory explicitly in an isolated Pi SDK setup, with native automatic compaction disabled.
+Load the factory into an isolated Pi SDK session. Pass the same `SessionManager` to both the extension factory and `createAgentSession`, and disable native automatic compaction.
 
 ```ts
-// Pass the same SessionManager used by createAgentSession.
-createContextExtension(sessionManager, {
+import { createContextExtension } from './src/extension.ts';
+
+const extension = createContextExtension(sessionManager, {
   policy: 'oldest-first-v1',
   budget: { contextLimit: 32768, marginTokens: 1024 },
 });
 ```
 
-For `openai-codex-responses`, also supply `budget.outputReserveTokens` and use isolated SDK settings with `transport: 'sse'`. For example, `budget: { contextLimit: 32768, marginTokens: 1024, outputReserveTokens: 4096 }`. Codex does not serialize an output cap in Pi 0.87.1. This reserve is planning headroom, not an enforced completion limit or spending cap. Tests cover the real SDK and serializer with scripted inference, not live selector performance.
+This deterministic policy retires eligible tool results in capture order when the request exceeds its budget. It makes no relevance-model calls and does not restore results automatically. The budget is illustrative, not a calibrated default. See [`test/extension.test.ts`](test/extension.test.ts) for the complete isolated SDK setup.
 
-These budget values are examples, not calibrated defaults. The policy preserves the recorded view until the full serialized request exceeds the budget. It then retires visible, eligible observations in capture order until the request fits. It skips any observation whose stub would not shrink the request. If retirement cannot make the request fit, dispatch stops and no proposed selection is recorded. This policy does not restore evidence automatically.
+Automatic retirement and restoration use `jev-select-v1`, which requires explicit Jev, selection, and brief-model configuration. Brief generation and relevance judgments incur separate inference costs. Configuration and failure behavior are documented in [Architecture and behavior](docs/architecture.md).
 
-For integration tests, `policy: 'scripted-v1'` accepts an optional `select` callback. Omitting it or returning `null` reuses the recorded view. Each extension instance uses one policy. All policies honor existing branch-owned native selections on resume, regardless of which policy recorded them. A factory is bound to one SDK SessionManager. Using it with another manager stops dispatch.
+## Important limits
 
-## Jev retirement
+- Only whole text tool results can be retired. User and assistant messages, incomplete exchanges, and the newest complete tool exchange remain protected.
+- Provider support is limited to text Completions and full, stateless Codex SSE requests. Codex requires explicit output-reserve headroom, which is not an enforced output-token cap. Other transports and normal extension stacks remain unverified.
+- Relevance scores and archive lookup can miss dependencies. No threshold is recommended as safe by default.
+- Budget checks use conservative byte counts and a separate heuristic working-context estimate. They are not a tokenizer or a hard spending cap.
+- Unknown inference cost, invalid history, and requests that cannot fit stop dispatch. There is no automatic summary fallback.
 
-`policy: 'jev-v1'` adds a required `jev` configuration. The caller supplies `apiKey`, `retireBelow`, and `timeoutMs`. There is no default relevance cutoff and no automatic credential lookup. `timeoutMs` must be between 1 and 60,000. An optional `endpoint` supports the local fixture. The default is `https://api.typesafe.ai/v1/systemone`, and redirects are refused.
+## Documentation
 
-The policy sends bounded batches of Noul relevance questions to `jev-1.13.0`, only under the same context pressure as oldest-first. Both policies use the same eligible, visible observations whose stubs shrink the serialized request. An unchanged view that fits does not call Jev. A request with no eligible candidates also skips Jev.
+- [Architecture and behavior](docs/architecture.md) covers policies, task briefs, persistence, provider mapping, and safety limits.
+- [Evaluation](eval/README.md) covers offline diagnostics, integration controls, and paid-run boundaries.
+- [Paired native task runner](eval/swebench/README.md) covers sandboxed coding runs, patch grading, and source coverage.
+- [Historical experiments](docs/experiments/README.md) contains earlier pilot reports with their original scope and limitations.
 
-Jev candidates are ordered by increasing relevance, with capture order breaking ties. Only scores strictly below `retireBelow` can be retired. If those candidates cannot make the request fit, the coding-model request stops. There is no fallback to higher-rated evidence or oldest-first. A low score is not a calibrated probability that removal is safe. The tests use a cutoff of 0.2 only to exercise the code, not as a recommended setting.
-
-**Legacy retirement judge state.** `jev-v1` uses version `unfinished-task-v3`. System/developer text from the outgoing payload, all user messages and corrections, assistant narrative, custom extension messages, and manual bash-execution messages stay whole and in conversation order. Origins remain distinct. Assistant thinking and provider signatures are omitted from the judge input, not the coding request. Paired assistant tool calls retain their ID and name without repeating arguments. Unpaired calls keep their arguments inline so interrupted actions are not silently lost. Each candidate appears whole in its own question, including its arguments, capture time, status, and verified model-visible text. Tool-result positions retain identities and markers for candidate-for-evaluation, retired, or omitted-for-judge-budget content. Noncandidate arguments and bodies are optional context, admitted together. Questions cannot see other candidates' arguments or bodies. Images have omitted-image markers and remain ineligible for retirement. Questions target the unfinished task and warn that unavailable context is not evidence of irrelevance or supersession.
-
-**Bounds.** Each request must fit local caps of 30,000 UTF-8 JSON bytes for state plus any one question and 60,000 bytes for the complete request. These are conservative proxies for Jev's documented 32k/64k token limits, not a tokenizer. The builder partitions admitted whole candidates in the selection plan's order into at most eight sequential requests. All batches use the same shared state. After reserving mandatory state and candidate space, the builder admits whole noncandidate visible arguments and bodies newest-first by message position. It stops at the first observation that cannot fit every batch and pair. Older observations remain marked as omitted, even if smaller. Optional context does not create extra batches. Shared state is sent and billed again for each batch. Packing affects only judge input, never the coding model's view.
-
-The decision is preflighted before any network call. `jev-v1` requires the entire candidate pool to fit and stops on a pair or decision limit. The single-request pilot helper still rejects pools needing multiple batches (`batch-cap`). `jev-select-v1` instead skips oversized whole candidates and records them as unjudged. It packs in capture order into at most eight batches. Once the last batch is reached, a candidate that cannot fit is skipped, but a smaller later candidate may use the remaining room. Skipped candidates remain explicitly unavailable in judge state, and their visibility cannot change from a missing score. There is no candidate clipping, summary, substitute judge, or automatic HTTP retry. The legacy retirement policy still has unbounded conversation state. Automatic reconsideration instead uses the bounded task brief described below. A whole candidate can still exceed the pair cap on its own. Omitted context can hide dependencies or corrections carried in tool results. The packing rule and prompt have not demonstrated live selection quality or injection resistance.
-
-**Judge records.** Each HTTP call has branch-owned `jev-context/judge-start` and `jev-context/judge-result` entries. They share the decision request ID and identify the zero-based batch index and total batch count. The start records the model and prompt versions, coding-provider API, endpoint, cutoff, that batch's candidate IDs, byte counts, omitted observation IDs and body sizes, request hash, remaining timeout, and price schedule. It records no API key or second copy of the prompt. The result records outcome, latency, response model, raw usage, scores, and nullable priced cost. All batches share one `timeoutMs` deadline. No scores are applied until every planned batch succeeds. Candidates omitted during local planning remain unchanged, but a failed dispatched batch rejects the entire selection, while retaining earlier results and costs. Benchmark request limits count individual HTTP calls, not decisions.
-
-Cancellation never installs a partial selection. If the branch moves during the HTTP call, no result or selection is written onto the new branch. The original branch retains an unmatched start entry whose outcome and incurred cost remain unknown. Even a matched result with unavailable usage has unknown cost, not zero. Costs computed from reported usage use the documented $0.042 per million input tokens and free output, checked on 2026-09-21. They are estimates, not reconciled charges.
-
-## Automatic reconsideration
-
-`policy: 'jev-select-v1'` uses the same Jev client, protected content, provider mapping, and request budget. It requires both `selection` and `brief` configuration. `selection` contains `archiveLimit` and `restoreAtOrAbove`. The archive limit must be a positive safe integer. The restoration cutoff must be greater than `jev.retireBelow` and at most 1. Neither setting has a default or a calibrated recommendation.
-
-**Shared task brief.** `brief` requires an explicit Pi `model`, `timeoutMs`, and `maxTokens`. There is no default model or silent reuse of the coding model. The default completion uses the session's authenticated `modelRegistry.streamSimple`; a `complete` callback lets an evaluation harness separately guard and account for this traffic. It is a distinct inference request, not part of the coding-model stream. Do not enable it in a budgeted harness without guarding that callback.
-
-The brief is updated only when there are eligible retirement candidates under pressure or fresh events require reconsidering archived evidence. Fitting turns with no archive skip brief inference and instruction snapshots. On demand, at most one incremental update is attempted before the coding request when branch sources have advanced. A backlog may delay soft-pressure selection across turns. If hard pressure arrives before the brief catches up, the unchanged hard guard stops the request rather than authorizing edits from a stale brief. The updater sees the previous brief and bounded new user/system/assistant/extension text, not tool calls, manual shell executions, tool-result bodies, or private reasoning. Assistant messages without nonblank text do not advance the brief. Tool-only turns can reuse a current brief while still triggering retirement and restoration judgments. Actual assistant prose and user/system changes still require an update. Actual provider-rendered instructions are stored as branch-owned instruction sources. Progress records a source ID, UTF-16 offset, and prefix hash, so long entries can be scanned across attempts without claiming partial entries are complete. Input is capped at 24,000 serialized JSON bytes, the stored brief at 8,000, and returned update text at 16,000. These are local data caps, not provider wire or token counts.
-
-Requirements, constraints, and questions need exact quotations from scanned user/system sources. Existing items must be retained or explicitly superseded with newer authoritative source text. Assistant and extension claims can supply activity, not close requirements. Exact citations establish provenance only. They cannot prove that a summary is complete, correctly interpreted, or useful. Capacity limits and rejected updates can still prevent a current brief.
-
-Retrieval and judging use the same completed brief. Judge prompt `source-linked-task-v1` supplies brief items and activity plus a suffix of whole recent conversation entries fitting 4,000 JSON bytes before optional tool-context admission. An oversized recent entry blocks older entries rather than being clipped. The full conversation and raw instructions are not resent to the judge. Whole candidate observations and their arguments still appear in individual questions, with the existing pair/request/batch limits. Neither brief nor judge input replaces coding history or changes reasoning. Tool-only activity remains in the judge's bounded recent window and candidate arguments rather than being summarized through a second model call. Archive lookup still uses brief text only. Identifiers discovered solely through tools may therefore be absent from its query.
-
-Brief starts, results, and accepted snapshots are branch-owned entries (`jev-context/brief-start`, `brief-result`, and `task-brief`). Results identify the update and contain nullable catalog-priced Pi-normalized usage. They are separate from coding and Jev usage, not reconciled provider charges. An unmatched start or unknown cost stops later inference on that branch. Cancellation before the completion callback is invoked records known zero cost and allows a later retry. After invocation, missing usage remains unknown even if the call is cancelled. Invalid or incomplete updates preserve all evidence and leave selection events unconsumed; coding may proceed only if the unchanged request passes the hard guard. The identical rejected input/model/output-limit combination is not dispatched again. New input may permit another attempt. Branch changes and failed persistence cannot install a brief or selection on another branch. Older experimental brief snapshots whose scanned prefix includes tool-call or shell-execution text are incompatible with the text-only source stream. They defer selection without rescanning for a fee or changing evidence. Start a fresh experimental session to use the new source policy. Unknown-cost records still stop inference.
-
-An optional `selection.workingContextLimit` sets a soft estimated-token target below `budget.contextLimit`. Both limits include reserved output and margin, but use separate input measurements. The hard guard still counts serialized UTF-8 JSON bytes conservatively. The soft estimate starts from the previous successful response's reported input, including cached tokens, adds its reported output once, then estimates new user/tool input and signed changes to old tool bodies at four serialized bytes per token. It does not count encrypted reasoning bytes as tokens. This is a heuristic, not a tokenizer or a safety bound. The working limit must be a positive safe integer no larger than the effective hard limit, including the model's context window. Omission preserves the original hard-pressure-only behavior. No target is calibrated or enabled by default.
-
-The usage anchor is memory-only and tied to the selected request and its assistant response on the active branch. Fresh or resumed instances start with an unknown soft estimate. Missing or invalid usage, failed or cancelled responses, changed request settings, incompatible history, or a branch without that response invalidate it. A subsequent successful response can establish a new anchor. Unknown soft pressure does not trigger retirement. Archive reconsideration and the independent hard guard still apply.
-
-For example, `budget: { contextLimit: 32768, marginTokens: 1024 }` with `selection: { archiveLimit: 2, restoreAtOrAbove: 0.8, workingContextLimit: 16384 }` aims for at most 16,384 estimated tokens including reserves while retaining the independent 32,768 conservative hard stop. These are illustrative settings, not recommended thresholds.
-
-A new user message or completed tool exchange creates a selection opportunity when the request exceeds the working target or retired evidence exists. The last selection or recorded safe deferral is the active branch's event checkpoint. Resuming or continuing the same checkpointed history does not itself trigger another judgment. An absent checkpoint or a last selection from another policy makes existing events eligible for reconsideration. Multiple pending events are handled in one decision. Incomplete exchanges do not trigger reconsideration. Hard-limit pressure can still force retirement without a fresh event.
-
-The decision includes the bounded lexical archive shortlist. Visible observations become candidates only under hard pressure or fresh, known soft pressure. An archive hit alone no longer causes every visible observation to be judged. Code first retires judged visible candidates scoring strictly below `retireBelow`, lowest score first, only as needed to fit the hard limit and working target. It then considers archived candidates scoring at or above `restoreAtOrAbove`, highest score first with capture-order ties. A restoration must fit both limits, unless the soft estimate is unknown. Under pressure, additional already-judged low-rated visible evidence may make room. A failed restoration trial is rolled back, including its trial retirements, before considering a smaller candidate. Admitted evidence returns at its original position with a historical label. Newly restored evidence cannot be retired again within that decision. Missing or intermediate scores preserve visibility. The threshold gap is experimental, not a guarantee against oscillation.
-
-A base view may remain above the soft target when protected, unjudged, or higher-rated evidence prevents shrinking it. That does not allow optional restorations to make the target miss worse. With no pressure, a restoration can use free room but cannot displace unjudged visible evidence. Skipped restorations no longer turn a fitting base view into a hard stop. The complete proposal must pass the hard budget before native edits and the event checkpoint are written. Successful no-op and partial attempts consume the event, including target misses and unjudged candidates. With no archive match and no working pressure, or no eligible candidates, the extension skips Jev. Existing `oldest-first-v1` and `jev-v1` retain their hard-pressure triggers as separate comparison policies.
-
-**Failure behavior.** Local packing limits produce per-candidate `unjudged` diagnostics with the reason (`pair-cap` or `decision-cap`), state bytes, and pair bytes measured during planning. Other fitting candidates can still be judged and selected. Zero fitting candidates cause zero judge calls and leave the view unchanged. A failed dispatched judge response instead defers the entire decision only when the unchanged coding request fits the hard limit and usage with the pinned model establishes a known cost. This includes invalid answers and HTTP failures with valid accounting. Deferral writes no context edits and checkpoints the event with its reason and candidate IDs still lacking valid scores. Earlier batches' valid scores remain diagnostic only. Resuming a checkpoint does not rejudge it; a fresh user/tool event can try again.
-
-Unknown judge cost, including typical timeouts, network errors, and HTTP errors without usage, still stops dispatch. Cancellation, a changed branch, invalid state or mapping, persistence failure, and a request exceeding the hard limit also cannot defer. If judged retirements cannot make the base request fit the hard limit, dispatch still stops with the proposed retired IDs and budget measurement. Unjudged evidence is never a fallback retirement, even under hard pressure. A partial pool may incur judge cost before this final hard stop. Stopped attempts do not consume the event checkpoint. Retrying an intact earlier branch can repeat a failure or charge.
-
-Repeated safe deferrals or unjudged candidates may leave the context above the working target and eventually reach the hard stop. If protected or higher-rated material keeps the base view above the soft target, restorations stay blocked even after judged low-rated evidence is retired. A low target can cause a judgment on every fresh event, even when all candidates are retained. There is no cross-event score cache, cooldown, or automatic retry. Checkpoints and usage records expose target misses; they do not imply useful selection, savings, or daily-use readiness.
-
-Judge-start, selection, and stop records carry applicable reconsideration metadata, including event entry IDs, retrieval version, pool/match counts, shortlist IDs and limit, restoration cutoff, unjudged candidates, and `skippedRestoreIds` for high-scored restorations rejected for lack of room. Pi's native projection owns visibility. The version 2 selection checkpoint contains the policy and pre-edit leaf, not the retired set. Diagnostic metadata does not introduce another state store. The `workingContext` measurement in reconsideration metadata and usage/stop records reports the configured target (null when omitted), effective target, and whether it fits. With an explicit target, its method is `provider-usage-plus-delta-v1`; unknown estimates have `inputEstimate: null`, `fits: null`, and an `unknownReason`. Known estimates identify the preceding request through `anchorRequestId`. The separate `budget` always describes the hard dispatch limit. A recorded target miss is not a budget stop. Candidate count does not bound judge bytes. Pair, request, and decision batch limits still apply. Missing archive candidates remain a retrieval limitation, not evidence that no useful history exists.
-
-Local SDK tests exercise selection before the hard limit, allowed target misses, protected-only requests, restoration using target headroom, user and tool-loop triggers, original-text restoration without tool execution, unchanged prefixes, extracted resume checkpoints, atomic swaps, insufficient space, zero matches, bounded two-read judge input, safe deferral and unchanged resume, known versus unknown judge cost, deferral write failures, cancellation, and successful late responses after a branch move. They use scripted model and judge responses. They establish integration behavior, not real relevance quality, cache hits, task accuracy, or savings. Normal-stack compatibility and installation remain out of scope.
-
-## Archive lookup diagnostics
-
-`retrieveArchive(history, query, maxCandidates)` returns a bounded shortlist of currently retired, eligible observations from a validated active-branch history. It neither restores them nor calls Jev. It reads complete original text and tool metadata, not retirement stubs. Visible and off-branch observations cannot enter the archive pool. The caller supplies a query string and an explicit positive shortlist limit. Automatic reconsideration derives that query from current brief items and activity.
-
-Version `token-overlap-v1` ranks against only the supplied query. It does not reconstruct a second task description from conversation history. Candidate documents include their tool name, argument values, and whole text. Matching splits camelCase and punctuation, ignores single-character terms, and weights distinct matching terms by their frequency across the archive. Repetition gives no extra weight. Capture order breaks ties; zero-match results are not padded into the shortlist. This is a simple lexical baseline, not semantic relevance, BM25, or a calibrated score. The lookup does not resolve supersession itself. Brief construction owns which requirements remain in the query.
-
-```sh
-npm run eval:retrieval
-```
-
-This offline command prints a deterministic JSON coverage report over 11 authored development cases with authored queries. It does not test automatic brief quality. Expected labels and rationale stay outside retrieval inputs. The report compares the shortlist with all authored relevant observations in the archive, then uses the uncapped lexical ranking to distinguish no-match misses from shortlist-cutoff misses. The full archive is a coverage reference, not a model oracle. No credentials, Jev calls, coding-model calls, or session files are used.
-
-The initial diagnostic finds all authored relevant observations in seven cases, including task detours, metadata-only matches, buried text, and a distinctive identifier in archives of 8, 64, and 256 observations. Four cases deliberately expose limitations. A synonym dependency has no lexical match; an obsolete requirement outranks its correction; a one-item shortlist cannot include two required observations; and a shared `.txt` extension admits an unrelated earlier result ahead of the required one. These misses are retained as diagnostics, not hidden by tuning the fixtures. Finding every relevant observation does not mean the shortlist contains no irrelevant ones.
-
-The limit bounds returned candidate count, not search work or judge-input bytes. Lookup still scans the archive and sorts matches. It provides no logarithmic-search, latency, task-accuracy, injection-resistance, or savings evidence. A later selection policy must handle retrieval misses and actual request limits separately. The retirement-only policies remain pressure-triggered. The automatic reconsideration policy consumes this lookup without changing its ranking.
-
-## ContextBench evidence diagnostics
-
-```sh
-npm run eval:contextbench
-```
-
-This offline command prints an authored fixture report, not a benchmark result. It demonstrates a reference line being read, retired, then restored. Cumulative discovered coverage stays at 1 after the read while currently visible coverage falls to 0 and returns to 1. It makes no network requests and loads no credentials. Separate tests run real Pi reads against the local HTTP fixture and capture the actual received requests, proving the same behavior without re-executing a restored observation.
-
-The capture bridge supports Completions and full, stateless Codex payloads. It verifies tool outputs against the active session projection, including Codex call-ID normalization, without altering reasoning. Capture records what was sent. The extension, not the scorer, owns request-budget enforcement. `eval/contextbench.ts` owns three boundaries. `captureRequest` checks original branch evidence against the selected tool text actually dispatched, including retirement stubs and historical restoration labels. It records payload/source hashes, evidence identities, visibility and source mappings. `analyzeCaptures` receives evaluator-only reference spans after capture and reports discovery, current visibility, observed retirement/restoration transitions and unmapped reasons. `exportDiscovery` emits the discovery-step shape accepted by [ContextBench's parser](https://github.com/EuniAI/ContextBench/blob/1436c28a8eb95496da4ea69ad458b9f8a8eb7d61/contextbench/parsers/trajectory.py), not an official evaluation or final patch-context prediction.
-
-**Mapping.** Only successful, untruncated text `read` results can map to base-source lines. The mapper reproduces Pi 0.87.1's range selection and footer using its pinned truncation helper, requires exact original-text equality, then excludes the trailing empty pseudo-line. Restored results map from their preserved originals after the historical wire label is verified separately. Shell output, unavailable source, errors and changed content stay explicitly unmapped. Matching base lines does not prove that historical content describes the current filesystem. The source snapshot is evaluator input, not additional context sent to the agent or Jev.
-
-**Meaning and limits.** Discovery means a tool observation exists in captured branch history, not proof that the model used it. Coverage unions overlapping and adjacent mapped lines. It is a mapped lower bound with separate unknown counts, not an estimate that unmapped evidence is irrelevant. No reference lines yields `null`, not perfect coverage. No captured requests yields `no-captures`. The first capture has unknown prior transitions. Later captures must extend the same session branch and source snapshot. Capture IDs belong to the transport observer and are not extension usage IDs. Only received HTTP requests are counted. Budget stops, missing transport captures, task correctness and costs need separate run accounting before any campaign.
-
-**Export boundary.** Discovery steps contain newly recorded observations per captured request, including empty steps. Restorations do not count as new reads. These request boundaries differ from upstream retrieval steps, so AUC and redundancy would not be leaderboard-comparable. Final context and model patch fields are deliberately absent. Do not feed this export directly to the full upstream evaluator. At the pinned revision it can substitute a gold patch for a missing model patch when computing EditLoc and exclude error cases from aggregate scores. The bridge neither invokes that evaluator nor reports official metrics. Gold annotations are never capture inputs, and no actual ContextBench task or gold solution has been run or inspected for this fixture.
-
-## Paired native coding tasks
-
-The [paired task runner](eval/swebench/README.md) connects actual sandboxed Pi reads and Codex request captures to native SWE-bench patch grading and evaluator-only ContextBench line coverage. It reuses one trajectory per arm for all three surfaces. Task preparation, image pinning, and a frozen development-set protocol are required before live runs. Scripted local runs establish integration behavior, not benchmark quality or savings.
-
-## Behavior proved locally
-
-Tests demonstrate the following properties against Pi 0.87.1 and the local fixture.
-
-- Original session message entries remain unchanged on disk while the model receives a selected view.
-- Repeated requests preserve the existing serialized message prefix when the view is unchanged.
-- Resume, tree navigation, and extracted forks use only selections on their active branch.
-- Actual tool-loop results are persisted before the next selection. Every result in the newest complete tool exchange is protected, including multiple calls in one assistant response.
-- Scripted restoration returns original text at its original position with a historical label. It does not rerun tools.
-- Unknown evidence, ambiguous tool identities, and modified incoming tool results fail explicitly. Interrupted exchanges stay protected, and the session can continue using Pi's existing provider-side protocol repair without changing stored evidence.
-- Cancellation and rejected selections do not install partial decisions. A final-payload budget rejection does not commit the proposed selection or send an HTTP request.
-- Under pressure, retirement changes only the selected tool-result text in the actual provider request. Newly produced observations stay visible for the next model response. Resume reproduces the selected prefix without another decision when the request still fits.
-- Fixture Jev scores can preserve older evidence while retiring a newer eligible result. Scores at the cutoff, invalid responses, cancellation, and oversized judge inputs cannot force a retirement. Judge failures are recorded separately from coding-request budget stops.
-- Disabling native automatic compaction prevents summarization and retry after a simulated provider overflow.
-- Input, output, cache, and cost fields exposed by Pi are captured with the request's budget measurement.
-- System-prompt and active-tool changes reach the provider without changing evidence identity or protection.
-- Accepted selections become native context edits. Actual wire content agrees with Pi's projection, including after restoration and resume. Checkpoints do not duplicate visibility state.
-- Incomplete edit groups and unsupported native edits stop explicitly. Injected edit/checkpoint write failures prevent dispatch and suppress further writes from that extension instance.
-
-These checks do not establish live cache hits, Jev selection quality, or monetary savings.
-
-## Deliberate boundaries
-
-**Protected content.** Only whole text tool results can be retired. The newest complete tool exchange, results from incomplete exchanges, non-text results, user messages, and assistant messages stay intact. Retired results keep their original call relationship, status, and details. Their text is replaced by a deterministic stub. Error and truncation status remain separate.
-
-**Selection state.** Pi's [append-only context edits](https://github.com/earendil-works/pi/blob/v0.87.1/packages/coding-agent/docs/session-format.md#contexteditentry) own the working view. Original tool results remain in raw history. Current visibility and prior retirement are derived from validated edits, never inferred from an original result's text. Version 2 custom checkpoints record only policy, pre-edit leaf, and optional diagnostics. Legacy version 1 retired-set records have no migration path and stop explicitly. Start a new experimental session instead. Summarized histories, arbitrary native edits, and reused tool-call IDs across valid assistant turns remain unsupported.
-
-**Commit boundary.** The context hook reads Pi's projected view and applies only a new scripted proposal. Automatic selection runs at the provider-request hook, where the payload includes system text, tool schemas, and the output allowance. After the complete proposal fits, the bound SDK manager synchronously appends changed tool-result edits followed by a checkpoint anchored to the pre-edit leaf. Unchanged selections need no edits. Successful no-op reconsiderations and safe deferrals still record an event checkpoint. No edit is written for a budget-rejected or cancelled proposal. A completed group does not imply provider acceptance or task success.
-
-**Persistence limits.** Edits and their completion checkpoint are sequential writes, not a disk transaction. The reader rejects incomplete or interleaved groups, including a branch taken in the middle of a group. Branch at a completed checkpoint or a message instead. An edit or checkpoint write failure stops dispatch and poisons that extension instance so it writes no further edits, stop records, or usage records. Pi may still append its own lifecycle messages. Reopening an intact branch is required before continuing. These checks detect incomplete groups and broken ancestry, not every form of file corruption. There is no rollback or automatic repair.
-
-**Provider mapping.** Selection supports text-only `openai-completions` and full-input `openai-codex-responses` payloads. It verifies that outgoing tool text matches the selected view, including historical labels and Pi's Unicode sanitation. Only that text field changes. Codex reasoning items, assistant messages, tool calls, IDs and instructions remain untouched. Both function and grammar-tool outputs are supported. Codex requires same-model assistant history and uses Pi's exact call-ID suffix stripping. Model switches, missing or ambiguous mappings, changed text, stateful delta bodies, media, tool-search items and mid-conversation tool additions stop explicitly. Plain system/developer updates are included in judge instructions. Completions still requires unchanged, unique tool-call IDs. Codex callers must select SSE explicitly. The extension does not enforce the transport setting. Pi can construct a WebSocket delta after the provider hook, beyond this validator's view, so WebSocket and automatic transport remain unverified. Other extension stacks and APIs remain unverified.
-
-**Budget estimate.** The estimator counts UTF-8 bytes of the complete serialized payload as an input-token estimate, then adds output reserve and an explicit margin. Completions reserves the request's actual output limit and records `outputReserveSource: 'request-limit'`. Codex requires a positive `outputReserveTokens` and records `'configured-headroom'`. That headroom does not bound actual generation. The byte count includes instructions, tool definitions and opaque reasoning, but is neither a tokenizer nor a universal upper-bound proof. Encrypted reasoning bytes can exaggerate input size. A request that would fit may be stopped. No margin or reserve is calibrated. Multimodal payloads and other provider APIs stop explicitly. Images are preserved by the view builder, but are not supported end to end by the budget gate.
-
-**Compaction and failures.** The SDK harness disables native automatic compaction, automatic retries, and cache warming in isolated settings. The extension also cancels compaction hooks. There is no summary fallback or substitute selector. Stop records distinguish budget rejection, invalid state, and cancellation because Pi can label an early cancellation as an error. User cancellation is not counted as a manager rejection or shown as a manager error notification. No global Pi settings are changed.
-
-**Usage.** Records preserve Pi-normalized usage and its calculated cost fields, not raw provider billing. All-zero usage is marked unavailable rather than treated as evidence of a free request. Individual zero fields may be provider defaults rather than measured quantities. The fixture's usage numbers are synthetic and cannot establish actual cache behavior or prices.
-
-## Synthetic Jev pilot
-
-`npm run pilot` prints a dry-run manifest without loading credentials or making network requests. Six authored histories cover basic relevance, a task detour, a corrected requirement, a buried dependency, a superseded read, and instruction-like tool output. Each contains two eligible candidates and a protected latest exchange. Expected answers and their reasons are kept outside the requests. The pilot uses the existing history, candidate, state-builder, and HTTP-client code without a separate prompt.
-
-`npm run pilot:live` loads `TYPESAFE_API_KEY` from the ignored `.env` file and sends those six requests twice, sequentially. Both repeats use identical frozen bodies. This command spends money. The approved campaign is at most 12 requests to `jev-1.13.0`, with no retries, coding-model calls, or automatic expansion. Each request reserves the price of 64,000 input tokens. The full reservation is $0.032256 against a $0.05 estimated allowance at the recorded price. This is not a provider-enforced billing cap. An unexpected usage report stops further requests, but cannot undo charges already incurred.
-
-The runner creates `results/synthetic-v1/` exclusively and refuses to overwrite or resume it. The manifest, including exact synthetic requests, labels, hashes, versions, and price schedule, is written before network access. The journal records a start before each call and the result afterward, with raw usage, scores, and latency. The first service/contract failure or cancellation stops the campaign. Wrong relevance judgments do not cause tuning or retries. An unmatched start after a process crash has unknown outcome and cost. Do not delete the directory to retry an interrupted campaign without reconciling its attempted calls and obtaining approval for further spending.
-
-`report.json` separates unknown costs from the known subtotal, reports relevant-versus-irrelevant pair order, and measures repeat score differences. Strict cutoffs of 0.1, 0.2, and 0.5 are offline diagnostics only. A hypothetical harmful omission means an authored relevant candidate scores below that cutoff; an irrelevant retention is counted separately. No selected context or agent action is executed. These six development cases cannot establish a safe default threshold, calibrated probabilities, injection resistance, real task accuracy, or savings. The client config's required `retireBelow` value is unused by the direct evaluation calls.
-
-Artifacts are private, local, and Git-ignored, not an automatically backed-up research archive. Keep the exact manifest and journal with any report derived from this campaign. A later confirmation study needs a separate frozen dataset and approved protocol.
-
-### Paired task-state pilot
-
-`npm run pilot -- --paired` prints the second protocol without network access. It holds candidate evidence fixed across six before/after task pairs. Three corrections swap the required target. A historical comparison and a newly enabled consumer each make a second observation relevant without displacing the first. A temporary detour leaves both relevance labels unchanged. Similar-topic negatives replace the first pilot's repeated marketing example. Relevant candidates occupy each position equally across the ten rankable states.
-
-`npm run pilot:paired:live` loads the ignored `.env` and sends the 12 states twice to the same model and prompt. The approved campaign is at most 24 requests, no retries, with a $0.064512 input reservation against a $0.10 estimated allowance. It writes exclusively to `results/paired-v1/`, separate from the first campaign, with the same journaling and stop rules. Both-positive states have no relevant-versus-irrelevant ranking comparison and are counted as not applicable. Paired results report signed score changes; unchanged labels are controls, not a requirement for identical scores. Missing states produce unknown changes, never zeroes or successes.
-
-These are authored development fixtures, not a held-out benchmark. A correct direction alone does not establish useful separation or safe removal. No cutoff is selected and no prompt is changed by the run.
-
-## Harbor integration smoke
-
-The first benchmark integration uses Terminal-Bench 2.1's `log-summary-date-ranges` task at revision `7131e4375048a0e408a8fb404b5f499d726b695b`. Harbor owns the Docker environment and runs the task's unchanged verifier. An isolated Pi SDK frontend loads our extension and calls a scripted model endpoint on loopback. One trial deliberately writes a wrong answer; another computes the correct answer from the task's logs. The runner requires verifier rewards of 0 and 1 respectively, plus exported native Pi sessions and usage records.
-
-Requires Docker and `uv`. This downloads the pinned task, installs Harbor 0.23.0, and builds the task container. It installs Node 22.22.3 and the npm lockfile dependencies inside the container. It makes no paid model calls and does not load `.env`.
-
-```sh
-uv run --no-project --python 3.13 --with harbor==0.23.0 python -m unittest eval.harbor.test_adapter
-uv run --no-project --python 3.13 --with harbor==0.23.0 python -m eval.harbor.smoke
-```
-
-Artifacts go into the exclusive, Git-ignored `results/harbor-smoke-v1/` directory. Existing campaigns are never overwritten or resumed. The manifest records source revision, task hashes and protocol limits. Each trial exports the upload manifest, requests, events, native sessions, labeled synthetic usage, verifier results, and `summary.csv`. Failed runs leave their logs for inspection.
-
-The adapter uploads only the package manifests, `src/*.ts`, its two frontend files, and the shared scripted Pi runner and evidence mapper. It does not upload local credentials, sessions, tests, or verifier files. Harbor injects the task verifier separately after the agent runs. The adapter reports zero model cost but does not put scripted token counts into Harbor's model metrics. The task's upstream base image and verifier dependencies are not fully pinned transitively, and installation requires network access.
-
-**Evidence boundary.** This is integration plumbing, not a quality evaluation. The task and solution have been inspected and must not enter a held-out set. Neither real coding-model ability, Jev selection, retirement under pressure, restoration, nor savings is tested by this two-turn smoke. Its result does not qualify a benchmark campaign for publication. The frontend's local tests also exercise budget rejection and HTTP failure, requiring failure artifacts and zero or one model requests respectively.
-
-## Native ContextBench task smoke
-
-`eval/swebench/smoke.py` runs two integration controls on `sympy__sympy-13551`, a member of ContextBench's pinned Verified subset. It uses SWE-bench 5.0.2's native grader, not the ContextBench context-metrics evaluator. The reference fix must resolve the task. Separately, Pi reads 40 lines of base source and appends a harmless comment. That nonempty patch must apply, leave the existing passing tests intact, and fail the task's repair tests. Empty patches, grader errors, infrastructure failures and missing reports cannot count as a successful negative control.
-
-```sh
-python3 -m unittest eval.swebench.test_smoke
-PYTHON_DOTENV_DISABLED=1 uv run --no-project --python 3.13 --with swebench==5.0.2 python -m eval.swebench.smoke
-```
-
-The native command requires Docker and `uv`, downloads a roughly 1 GB compressed Linux amd64 image, and installs Node 22.22.3 plus lockfile dependencies inside a separate agent container. On ARM hosts this requires working amd64 emulation. No Docker settings are changed. The dataset revision, ContextBench membership revision, image digest and Node archive checksum are recorded. This does not freeze every dependency fetched by the upstream grader.
-
-The exclusive, Git-ignored `results/contextbench-native-smoke-v1/` contains the manifest, command logs, evaluator-only dataset, native grade reports and test output, Pi patch, session, usage, actual HTTP payloads, immutable base source and line mappings. Use `--output` with a new directory for another intentional attempt. Failure artifacts are kept. Commands have timeouts and the runner removes only its own containers. Images remain cached.
-
-**Observed result.** Both native controls passed on the local ARM Docker host using amd64 emulation. The reference fix passed the one repair test and all 17 existing passing tests. Pi's comment-only patch failed the repair test and preserved all 17 passing tests. Three actual HTTP requests, one native Pi session and the 40-line source mapping were exported. No paid inference was used.
-
-The full task row, reference fix, test patch and grading script stay on the host evaluator side and are never uploaded to Pi. Pi receives only the problem statement, an allowlisted runtime bundle, and the official base environment. Inference is scripted over loopback with isolated credentials and resource loading. Neither `.env` nor host agent configuration is loaded. The mapped read proves capture against real repository source, not useful retrieval. This task is excluded from future held-out evaluation. Neither control tests Jev selection, agent accuracy, savings, or official ContextBench context scores.
-
-## Next stage
-
-Both live pilots are complete. The paired pilot found all 16 expected score changes, but retained 10 of 20 irrelevant judgments at a diagnostic cutoff of 0.2. No default cutoff was chosen. The benchmark integration smoke passed. Automatic reconsideration is now integrated as the separate `jev-select-v1` policy, with local SDK proof and explicit retrieval-miss diagnostics. Its event timing and strict cannot-fit stops are experimental choices. The local ContextBench bridge now distinguishes discovered from model-visible evidence, with explicit unmapped observations. The native SWE-bench task-environment and correctness-grader controls now pass for one ContextBench Verified member. The next evidence gap is actual agent trajectories comparing retirement alone with retirement plus restoration, using a frozen small development set and paired task-correctness, visible-evidence and total-cost accounting. Authored diagnostics do not establish task accuracy or savings.
-
-Before paid agent runs, choose the model/provider and propose the run count and expected cost. Live cache verification, provider-specific token calibration, and compatibility with the normal extension stack remain untested.
+Generated run artifacts and credentials are excluded from Git. Do not commit session dumps, raw model payloads, evaluator datasets, or `.env` files.
