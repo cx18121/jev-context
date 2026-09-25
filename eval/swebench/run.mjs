@@ -162,12 +162,13 @@ async function arm(phase, instruction) {
       async exec(command, _cwd, options) {
         // SDK context cwd is the isolated host session directory. Never execute there.
         try {
-          const result = await sandbox.command(command, { seconds: Math.min(120, Math.max(1, Math.ceil(options.timeout ?? 120))),
+          const result = await sandbox.toolCommand(command, { seconds: Math.min(120, Math.max(1, Math.ceil(options.timeout ?? 120))),
             signal: AbortSignal.any([deadline, ...(options.signal ? [options.signal] : [])]), onData: options.onData });
           return { exitCode: result.code };
         } catch (e) { fail(`Sandbox stopped: ${errorText(e)}`); throw e; }
       },
     } });
+    bash.description = 'Execute bash in the offline /testbed container. Returns a prefix of stdout and stderr, at most 32000 bytes and 2000 lines including a truncation notice. Discarded output is not saved. Narrow commands when output is truncated. Commands have a maximum timeout of 120 seconds.';
     bash.executionMode = 'sequential';
     const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const guard = () => assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd,
@@ -285,7 +286,7 @@ async function arm(phase, instruction) {
 }
 try {
   const sourceHashes = {};
-  for (const file of ['run.mjs', 'brief.mjs', 'codex-accounting.mjs', 'sandbox.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, root)));
+  for (const file of ['run.mjs', 'brief.mjs', 'codex-accounting.mjs', 'sandbox.ts', 'tool-output.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, root)));
   for (const file of await readdir(new URL('../../src/', root))) if (file.endsWith('.ts')) sourceHashes[`src/${file}`] = sha(await readFile(new URL(`../../src/${file}`, root)));
   for (const file of ['test/brief-fixture.ts', 'test/history-fixture.ts', 'package-lock.json']) {
     sourceHashes[file] = sha(await readFile(new URL(`../../${file}`, root)));

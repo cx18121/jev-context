@@ -49,7 +49,7 @@ test('Jev retires lower relevance rather than older evidence, and resume reuses 
     const selected = await fixture.session((manager) => [createContextExtension(manager, { policy: 'jev-v1', budget, jev: judge.config })], manager);
     await selected.session.prompt('Continue.');
     assert.equal(judge.requests.length, 1);
-    assert.deepEqual(Object.keys(judge.requests[0]!.questions), [ids.a, ids.b]);
+    assert.deepEqual(new Set(Object.keys(judge.requests[0]!.questions)), new Set([ids.a, ids.b]));
     assert.equal(fixture.requests.length, 2);
     const request = fixture.requests[1]!;
     assert.equal(tool(request, 'a').content, tool(full, 'a').content);

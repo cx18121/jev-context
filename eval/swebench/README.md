@@ -14,6 +14,9 @@ The runner accepts only an agent-facing JSON object with exactly `instanceId`, `
 # Scripted inference, actual Docker tools and Pi SDK. No model calls or credentials.
 node --import tsx eval/swebench/run.mjs --local agent-task.json results/NEW_LOCAL_RUN
 
+# Container-only output and cleanup contracts. No model calls or credentials.
+JEV_SANDBOX_TASK=agent-task.json node --import tsx --test test/swebench-sandbox-docker.test.ts
+
 # Evaluator-only inputs enter after the run.
 node --import tsx eval/swebench/score.ts results/NEW_LOCAL_RUN evaluator-reference.json
 PYTHON_DOTENV_DISABLED=1 uv run --no-project --python 3.13 --with swebench==5.0.2 \
@@ -28,6 +31,7 @@ Output directories are exclusive. Never overwrite an interrupted paid run to ret
 
 - Each arm independently verifies a clean checkout of the pinned image's HEAD and records that commit separately from the dataset source base. Native images may contain committed dependency/setup adjustments. As in the native grader, those stay in place. The captured agent patch is relative to the verified image HEAD, even if the agent later moves HEAD, so it excludes pre-existing setup changes. There are no host mounts or container networking. Cleanup targets only owned containers.
 - `read` uses native Pi range selection and footers with container-only content operations. It accepts plain ASCII paths under `/testbed`, caps the complete file at 1 MiB, and treats content as text. Native path resolution performs a metadata-only host existence probe, but may not alter the absolute path. It cannot fall back to host file reads. Bash runs only in the container and is the fallback for unusual paths.
+- Bash display output keeps a prefix within 32,000 bytes and 2,000 lines, including an explicit truncation notice. Excess output is drained and discarded until the command exits, not saved to a host file. The command's exit code is preserved, so the agent can narrow a search and continue in the same container. Infinite writers remain subject to the command timeout. Timeout, cancellation, and execution transport failures still remove the owned container. Exit codes 124 and 137 retain the timeout/killed interpretation. Full-file reads, patch capture, source snapshots, and container metadata never use display truncation.
 - The evaluator snapshots dataset-base regular UTF-8 files through one Git batch process before the first prompt. It does not substitute the prepared image's source for that reference. Symlinks, binaries, files above 1 MiB, and files exceeding the total 32 MiB snapshot allowance are explicitly excluded. The agent and judge never receive the snapshot as extra context.
 - Each dispatched coding request records its selected tool text against the current branch and immutable base snapshot. Shell output, modified files, truncated reads, and unavailable source remain unmapped. If a reference span needs unavailable base source, coverage is unknown rather than computed with a smaller denominator. Scores are local lower-bound diagnostics, not official ContextBench metrics.
 - Full stateless Codex SSE requests only. Reasoning, IDs, assistant text, and tool-call structure cannot change. No automatic compaction, retries, cache warmup, or resource discovery. Every arm gets a fresh session key. That does not guarantee independent provider caches.

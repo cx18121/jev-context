@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { posix } from 'node:path';
 import { createReadToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { SourceSnapshot } from '../contextbench.ts';
+import { ToolOutput } from './tool-output.ts';
 
 export interface AgentTask {
   instanceId: string;
@@ -38,7 +39,7 @@ export function createArgs(name: string, task: AgentTask): string[] {
     '--entrypoint=/bin/sleep', task.image, 'infinity'];
 }
 
-async function docker(args: string[], { signal, maxBytes = 1000000 }: { signal?: AbortSignal; maxBytes?: number } = {}) {
+async function docker(args: string[], { signal, maxBytes = 1000000, output }: { signal?: AbortSignal; maxBytes?: number; output?: ToolOutput } = {}) {
   signal?.throwIfAborted();
   return new Promise<{ code: number | null; text: string }>((resolve, reject) => {
     const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], signal });
@@ -46,12 +47,13 @@ async function docker(args: string[], { signal, maxBytes = 1000000 }: { signal?:
     let size = 0;
     let failure: Error | undefined;
     for (const pipe of [child.stdout, child.stderr]) pipe.on('data', (chunk: Buffer) => {
+      if (output) { output.append(chunk); return; }
       size += chunk.length;
       if (size > maxBytes) { failure = new Error('Docker output ceiling'); child.kill('SIGKILL'); return; }
       chunks.push(chunk);
     });
     child.on('error', reject);
-    child.on('close', (code) => failure ? reject(failure) : resolve({ code, text: Buffer.concat(chunks).toString() }));
+    child.on('close', (code) => failure ? reject(failure) : resolve({ code, text: output ? output.text() : Buffer.concat(chunks).toString() }));
   });
 }
 
@@ -92,26 +94,26 @@ export class Sandbox {
     } catch (error) { await this.close(); throw error; }
   }
 
-  private async exec(argv: string[], { signal, seconds = 120, maxBytes = 32000 }: { signal?: AbortSignal; seconds?: number; maxBytes?: number } = {}) {
+  private async exec(argv: string[], { signal, seconds = 120, maxBytes = 32000, output }: { signal?: AbortSignal; seconds?: number; maxBytes?: number; output?: ToolOutput } = {}) {
     assert.ok(!this.dead, 'Task container is stopped');
     assert.ok(Number.isInteger(seconds) && seconds > 0 && seconds <= 120);
     const combined = AbortSignal.any([AbortSignal.timeout(seconds * 1000 + 5000), ...(signal ? [signal] : [])]);
     try {
-      const result = await docker(['exec', '--workdir=/testbed', this.name, '/usr/bin/timeout', '--signal=KILL', `${seconds}s`, ...argv], { signal: combined, maxBytes });
+      const result = await docker(['exec', '--workdir=/testbed', this.name, '/usr/bin/timeout', '--signal=KILL', `${seconds}s`, ...argv], { signal: combined, maxBytes, output });
       if ([124, 137, null].includes(result.code)) throw new Error('Container command timed out or was killed');
       return result;
     } catch (error) { await this.close(); throw error; }
   }
 
-  async command(command: string, options: { signal?: AbortSignal; seconds?: number; maxBytes?: number; onData?: (data: Buffer) => void } = {}) {
+  async command(command: string, options: { signal?: AbortSignal; seconds?: number; maxBytes?: number } = {}) {
     assert.ok(typeof command === 'string' && command.length <= 20000);
-    const result = await this.exec(['/bin/bash', '--noprofile', '--norc', '-c', command], options);
-    if (options.onData) {
-      if (Buffer.byteLength(result.text) > 32000 || result.text.split('\n').length > 2000) {
-        await this.close(); throw new Error('Tool output byte/line ceiling');
-      }
-      options.onData(Buffer.from(result.text));
-    }
+    return this.exec(['/bin/bash', '--noprofile', '--norc', '-c', command], options);
+  }
+
+  async toolCommand(command: string, options: { signal?: AbortSignal; seconds?: number; onData: (data: Buffer) => void }) {
+    assert.ok(typeof command === 'string' && command.length <= 20000);
+    const result = await this.exec(['/bin/bash', '--noprofile', '--norc', '-c', command], { ...options, output: new ToolOutput() });
+    options.onData(Buffer.from(result.text));
     return result;
   }
 
