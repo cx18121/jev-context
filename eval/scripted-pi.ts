@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from '@earendil-works/pi-coding-agent';
-import { createContextExtension, STOP_ENTRY, USAGE_ENTRY, type UsageRecord } from '../src/extension.ts';
+import { createWorkingContextExtension, STOP_ENTRY, USAGE_ENTRY, WORKING_POLICY, type UsageRecord } from '../src/working-extension.ts';
 import { captureRequest, type SourceSnapshot } from './contextbench.ts';
 
 export interface ScriptedTool { name: string; arguments: Record<string, unknown> }
@@ -24,7 +24,7 @@ export async function runScriptedPi(options: {
     writeFileSync(join(artifacts, 'source.json'), JSON.stringify(source), { flag: 'wx', mode: 0o600 });
   }
   let capture: ((payload: unknown) => void) | undefined;
-  let calls = 0;
+  let calls = 0, sketchCalls = 0;
   const errors: string[] = [];
   let session: AgentSession | undefined;
   let manager: SessionManager | undefined;
@@ -75,12 +75,24 @@ export async function runScriptedPi(options: {
     const model = runtime.getModel('jev-smoke', 'scripted-smoke');
     if (!model) throw new Error('Missing scripted model');
     const settings = SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
-    const budget = { contextLimit: mode === 'budget-stop' ? 1 : 32768, marginTokens: 1024 };
+    const capacity = { contextLimit: mode === 'budget-stop' ? 1024 : 32768, marginTokens: 1024, maxRequestBytes: 300000 };
+    const target = mode === 'budget-stop' ? { lowTokens: 512, highTokens: 768 } : { lowTokens: 20000, highTokens: 24576 };
     manager = SessionManager.create(workspace, join(artifacts, 'sessions'));
     const loader = new DefaultResourceLoader({
       cwd: workspace, agentDir, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [createContextExtension(manager, { policy: 'oldest-first-v1', budget })],
+      extensionFactories: [createWorkingContextExtension(manager, {
+        capacity, target, order: { kind: 'capture-order' }, archiveLimit: 4, decisionTimeoutMs: 30000,
+        ranking: { maxPairBytes: 30000, maxRequestBytes: 60000, maxRequests: 8, maxSegments: 256,
+          maxInputBytes: 480000, maxCostUsd: 0.1, requestTimeoutMs: 2000, maxDurationMs: 16000 },
+        sketch: { model, timeoutMs: 2000, maxTokens: 1024, maxUpdates: 4, complete: async () => {
+          sketchCalls++;
+          return { role: 'assistant', api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop',
+            content: [{ type: 'text', text: JSON.stringify({ summary: 'Complete the supplied scripted task and verify its output.' }) }],
+            usage: { input: 80, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 84,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+        } },
+      })],
     });
     await loader.reload();
     if (source) capture = (payload) => appendFileSync(capturesPath, JSON.stringify(captureRequest({
@@ -113,8 +125,8 @@ export async function runScriptedPi(options: {
     const totals = records.reduce((sum, record) => ({ input: sum.input + record.usage.input, output: sum.output + record.usage.output,
       cacheRead: sum.cacheRead + record.usage.cacheRead, cacheWrite: sum.cacheWrite + record.usage.cacheWrite }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     writeFileSync(join(artifacts, 'usage.json'), JSON.stringify({
-      measurementKind: 'scripted-fixture', mode, nodeVersion: process.version, piVersion: '0.87.1',
-      modelCalls: calls, actualModelCostUsd: 0, syntheticUsage: totals,
+      version: 2, lifecycle: WORKING_POLICY, measurementKind: 'scripted-fixture', mode, nodeVersion: process.version, piVersion: '0.87.1',
+      modelCalls: calls, sketchCalls, syntheticSketchCostUsd: 0, actualModelCostUsd: 0, syntheticUsage: totals,
       failure, extensionErrors: errors, records,
     }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   }

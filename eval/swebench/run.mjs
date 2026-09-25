@@ -10,19 +10,17 @@ import { resolve } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
-import { createContextExtension, JUDGE_START_ENTRY, JUDGE_RESULT_ENTRY, STOP_ENTRY, USAGE_ENTRY } from '../../src/extension.ts';
+import { createWorkingContextExtension, INFERENCE_START_ENTRY, INFERENCE_RESULT_ENTRY, STOP_ENTRY, USAGE_ENTRY, DEFERRAL_ENTRY, WORKING_POLICY } from '../../src/working-extension.ts';
 import { SELECTION_ENTRY } from '../../src/history.ts';
 import { JEV_ENDPOINT, JEV_MODEL } from '../../src/jev.ts';
 import { Sandbox, parseTask, sandboxReadTool } from './sandbox.ts';
 import { captureRequest } from '../contextbench.ts';
-import { BRIEF_START_ENTRY, BRIEF_RESULT_ENTRY } from '../../src/brief-session.ts';
-import { scriptedBrief } from '../../test/brief-fixture.ts';
 import { tapResponse } from './codex-accounting.mjs';
-import { guardedBrief } from './brief.mjs';
+import { guardedSketch, SKETCH_REQUEST_BYTES } from './sketch.mjs';
 
 process.umask(0o077);
 const [mode, taskFile, output, ...extra] = process.argv.slice(2);
-assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-brief-invalid-usage', '--live'].includes(mode)
+assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--live'].includes(mode)
   && taskFile && output && extra.length === 0, 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY');
 const live = mode === '--live';
 const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
@@ -36,19 +34,22 @@ assert.equal(pkg.version, '0.87.1');
 const catalog = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-ai/dist/providers/data/openai-codex.json', root)));
 const pinned = catalog['openai-codex-responses']['gpt-5.6-sol'];
 const prices = pinned.cost;
-const pinnedBrief = catalog['openai-codex-responses']['gpt-6-luna'];
+const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : 24, judgeRequests: 24, requestMs: 90000,
   runMs: 2400000, toolSeconds: 120, requestBytes: 180000, responseBytes: 512000, catalogStopUsd: 3,
-  briefRequests: 24, briefMs: 30000, briefMaxTokens: 4096, briefRequestBytes: 40000, briefResponseBytes: 128000 };
-const budget = { contextLimit: 180000, marginTokens: 1024, outputReserveTokens: 4096 };
-const selection = { archiveLimit: 4, restoreAtOrAbove: 0.8, workingContextLimit: 24576 };
-const judgePolicy = { retireBelow: 0.2, timeoutMs: 15000 };
+  sketchRequests: 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
+const capacity = { contextLimit: 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
+const target = { lowTokens: 20000, highTokens: 24576 };
+const ranking = { maxPairBytes: 30000, maxRequestBytes: 60000, maxRequests: 8, maxSegments: 256,
+  maxInputBytes: 480000, maxCostUsd: 0.1, requestTimeoutMs: 15000, maxDurationMs: 120000 };
+const decision = { archiveLimit: 4, decisionTimeoutMs: 180000, sketchMaxUpdates: 4 };
 const systemPrompt = 'Fix the supplied Python repository issue in /testbed. Use read to inspect source files, with offset/limit for focused reads. Use bash to search, edit, and test. Commands execute in an isolated offline container. Do not commit. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds. Use the source and available tests, not network access. Finish with a concise summary of the fix and tests.';
-const report = { developmentOnly: true, mode, completed: false, accountingComplete: true, arms: [], requests: [], briefRequests: [], judgeDispatches: 0 };
+const report = { version: 2, lifecycle: WORKING_POLICY, developmentOnly: true, mode, completed: false,
+  accountingComplete: true, arms: [], requests: [], sketchRequests: [], judgeRequests: [], judgeDispatches: 0 };
 const deadline = AbortSignal.timeout(bounds.runMs);
 const nativeFetch = globalThis.fetch;
-let runtime, server, model, briefModel, baseUrl, judgeEndpoint, activeArm, fixtureTurn, sourceSnapshot, fixturePaths;
-const spent = () => [...report.requests, ...report.briefRequests].reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0)
+let runtime, server, model, sketchModel, baseUrl, judgeEndpoint, activeArm, fixtureTurn, sourceSnapshot, fixturePaths;
+const spent = () => [...report.requests, ...report.sketchRequests].reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0)
   + report.judgeDispatches * 64000 * 0.042 / 1e6;
 let jevKey = 'local-fake-key';
 const errorText = (e) => e instanceof assert.AssertionError ? e.message.split('\n')[0] : String(e.message);
@@ -81,17 +82,21 @@ async function setup() {
         if (req.url === '/judge') {
           if (mode === '--local-judge-failure') { res.writeHead(503); res.end('{}'); return; }
           res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ model: JEV_MODEL, answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: 'noul', noul: fixtureTurn >= 4 ? 0.95 : 0.1 }])), usage: { input_tokens: 5000, output_tokens: 5 } })); return;
+          const level = fixtureTurn >= 4 ? 4 : 1;
+          const answers = mode === '--local-judge-invalid' ? {} : Object.fromEntries(Object.entries(body.questions).map(([id, question]) => [id, {
+            type: 'score', score: level, confidence: 1,
+            legend: Object.fromEntries(question.criteria.map((text, i) => [i, text])),
+            probabilities: Object.fromEntries(question.criteria.map((_, i) => [i, Number(i === level)])),
+          }]));
+          res.end(JSON.stringify({ model: JEV_MODEL, answers, usage: { input_tokens: 5000, output_tokens: 5 } })); return;
         }
         assert.equal(req.url, '/codex/responses');
-        const isBrief = body.model === 'gpt-6-luna';
-        const answer = isBrief ? await scriptedBrief(briefModel).complete(briefModel,
-          { messages: [{ content: body.input[0].content[0].text }] }) : null;
-        const output = isBrief ? [{ type: 'message', id: `msg_brief_${randomUUID()}`, role: 'assistant', status: 'completed',
-          content: [{ type: 'output_text', text: answer.content[0].text, annotations: [] }] }] : fixtureOutput(fixtureTurn);
+        const isSketch = body.model === 'gpt-6-luna';
+        const output = isSketch ? [{ type: 'message', id: `msg_sketch_${randomUUID()}`, role: 'assistant', status: 'completed',
+          content: [{ type: 'output_text', text: JSON.stringify({ summary: 'Fix the supplied Python repository issue using source reads and tests.' }), annotations: [] }] }] : fixtureOutput(fixtureTurn);
         // Pressure first retires evidence; the third coding response establishes restoration headroom.
-        const inputTokens = isBrief ? 2000 : fixtureTurn < 3 ? 30000 : 10000;
-        const invalid = isBrief ? mode === '--local-brief-invalid-usage' : mode === '--local-invalid-usage';
+        const inputTokens = isSketch ? 2000 : fixtureTurn < 3 ? 30000 : 10000;
+        const invalid = isSketch ? mode === '--local-sketch-invalid-usage' && activeArm === 'selector' : mode === '--local-invalid-usage';
         const usage = { input_tokens: inputTokens, output_tokens: 200, total_tokens: inputTokens + 200, input_tokens_details: { cached_tokens: invalid ? inputTokens + 1 : 1024 } };
         const events = output.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item }));
         events.push({ type: fixtureTurn % 2 ? 'response.done' : 'response.completed', response: { id: randomUUID(), status: 'completed', output, usage } });
@@ -103,33 +108,47 @@ async function setup() {
     baseUrl = `http://127.0.0.1:${server.address().port}`; judgeEndpoint = `${baseUrl}/judge`;
     runtime = await ModelRuntime.create({ ...options, credentials: new InMemoryCredentialStore() });
     const fakeKey = `fake.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-only' } })).toString('base64')}.fake`;
-    runtime.registerProvider('jev-pair-fixture', { baseUrl, api: 'openai-codex-responses', apiKey: fakeKey, models: [{ ...pinned, id: 'gpt-5.6-sol', baseUrl }, { ...pinnedBrief, id: 'gpt-6-luna', baseUrl }] });
+    runtime.registerProvider('jev-pair-fixture', { baseUrl, api: 'openai-codex-responses', apiKey: fakeKey, models: [{ ...pinned, id: 'gpt-5.6-sol', baseUrl }, { ...pinnedSketch, id: 'gpt-6-luna', baseUrl }] });
     model = runtime.getModel('jev-pair-fixture', 'gpt-5.6-sol');
-    briefModel = runtime.getModel('jev-pair-fixture', 'gpt-6-luna');
+    sketchModel = runtime.getModel('jev-pair-fixture', 'gpt-6-luna');
   } else {
     // Read exactly the authorized judge key; never load the file into process.env or Docker.
     jevKey = parseEnv(await readFile(new URL('../../.env', root), 'utf8')).TYPESAFE_API_KEY;
     assert.ok(jevKey?.trim(), 'Missing TYPESAFE_API_KEY');
     runtime = await ModelRuntime.create(options);
     model = runtime.getModel('openai-codex', 'gpt-5.6-sol');
-    briefModel = runtime.getModel('openai-codex', 'gpt-6-luna');
+    sketchModel = runtime.getModel('openai-codex', 'gpt-6-luna');
     assert.ok(model && model.baseUrl === 'https://chatgpt.com/backend-api');
     baseUrl = model.baseUrl; judgeEndpoint = JEV_ENDPOINT;
   }
   assert.ok(model && model.api === 'openai-codex-responses'); model = { ...model, cost: prices };
-  assert.ok(briefModel && briefModel.api === 'openai-codex-responses' && briefModel.baseUrl === baseUrl);
-  briefModel = { ...briefModel, cost: pinnedBrief.cost };
-  // Judge alone uses global fetch. Coding and brief traffic have per-request guards.
+  assert.ok(sketchModel && sketchModel.api === 'openai-codex-responses' && sketchModel.baseUrl === baseUrl);
+  sketchModel = { ...sketchModel, cost: pinnedSketch.cost };
+  // Judge alone uses global fetch. Coding and sketch traffic have per-request guards.
   globalThis.fetch = async (url, init) => {
     if (String(url) !== judgeEndpoint) return nativeFetch(url, init); // Auth refresh remains owned by ModelRuntime.
-    assert.equal(activeArm, 'selector');
-    assert.ok(report.accountingComplete && report.judgeDispatches < bounds.judgeRequests && !deadline.aborted && spent() < bounds.catalogStopUsd);
-    assert.equal(init.method, 'POST');
-    assert.ok(Buffer.byteLength(init.body) <= 64000, 'Judge request ceiling');
-    const body = JSON.parse(init.body);
-    const n = ++report.judgeDispatches;
-    await save(`judge-${n}-request.json`, body);
-    return nativeFetch(url, { ...init, signal: AbortSignal.any([deadline, init.signal]), redirect: 'error' });
+    const record = { phase: activeArm, attempt: report.judgeRequests.length + 1, dispatched: false, requestHash: sha(init.body) };
+    report.judgeRequests.push(record);
+    try {
+      const guard = () => {
+        assert.equal(activeArm, 'selector');
+        assert.ok(report.accountingComplete && !deadline.aborted && spent() < bounds.catalogStopUsd, 'Run stopped by accounting, cost, or deadline');
+        assert.ok(report.judgeDispatches < bounds.judgeRequests, 'Judge request ceiling');
+        init.signal.throwIfAborted();
+      };
+      guard();
+      assert.equal(init.method, 'POST');
+      assert.ok(Buffer.byteLength(init.body) <= ranking.maxRequestBytes, 'Judge request size ceiling');
+      await save(`judge-${record.attempt}-request.json`, JSON.parse(init.body));
+      guard();
+      report.judgeDispatches++;
+      record.dispatched = true;
+      return await nativeFetch(url, { ...init, signal: AbortSignal.any([deadline, init.signal]), redirect: 'error' });
+    } catch (error) {
+      record.failure = errorText(error);
+      record.stopClass = record.dispatched ? 'provider-transport' : 'dispatch-refused';
+      throw error;
+    }
   };
 }
 async function arm(phase, instruction) {
@@ -173,13 +192,16 @@ async function arm(phase, instruction) {
     const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const guard = () => assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd,
       'Run stopped by accounting, cost, or deadline');
-    const brief = guardedBrief({ runtime, model: briefModel, sessionId: manager.getSessionId(), bounds, deadline,
-      records: report.briefRequests, guard, save, fetch: nativeFetch,
+    const sketch = guardedSketch({ runtime, model: sketchModel, sessionId: manager.getSessionId(), phase, bounds, deadline,
+      records: report.sketchRequests, guard, save, fetch: nativeFetch,
       unknownCost(reason) { report.accountingComplete = false; fail(reason); } });
-    const policy = phase === 'control' ? { policy: 'scripted-v1', budget } : { policy: 'jev-select-v1', budget, selection, brief, jev: { ...judgePolicy, apiKey: jevKey, endpoint: judgeEndpoint } };
+    const policy = { capacity, target, ranking, archiveLimit: decision.archiveLimit, decisionTimeoutMs: decision.decisionTimeoutMs,
+      sketch: { ...sketch, maxUpdates: decision.sketchMaxUpdates },
+      order: phase === 'control' ? { kind: 'capture-order' }
+        : { kind: 'jev', connection: { timeoutMs: ranking.requestTimeoutMs, apiKey: jevKey, endpoint: judgeEndpoint } } };
     const loader = new DefaultResourceLoader({ cwd, agentDir: `${cwd}/agent`, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [createContextExtension(manager, policy)], systemPromptOverride: () => systemPrompt, appendSystemPromptOverride: () => [] });
+      extensionFactories: [createWorkingContextExtension(manager, policy)], systemPromptOverride: () => systemPrompt, appendSystemPromptOverride: () => [] });
     await loader.reload();
     const created = await createAgentSession({ cwd, agentDir: `${cwd}/agent`, modelRuntime: runtime, model, sessionManager: manager,
       settingsManager: settings, resourceLoader: loader, tools: ['bash', 'read'], customTools: [bash, sandboxReadTool(sandbox, deadline)], thinkingLevel: 'medium' });
@@ -196,13 +218,15 @@ async function arm(phase, instruction) {
       const record = { phase, turn, dispatched: false, httpStatus: null, rawUsage: null, usage: null };
       outcome.requests.push(record); report.requests.push(record);
       const controller = new AbortController();
-      const signal = AbortSignal.any([deadline, controller.signal, options.signal, AbortSignal.timeout(bounds.requestMs)]);
+      const signal = AbortSignal.any([deadline, controller.signal, options.signal]);
       let inspected;
       const requestStart = performance.now();
       return inner(requestModel, context, { ...options, signal, transport: 'sse', timeoutMs: bounds.requestMs, maxRetries: 0,
         async onPayload(body, m) {
           const before = structuredClone(body);
+          const selectionStart = performance.now();
           const after = await options.onPayload?.(body, m) ?? body;
+          record.decisionMs = Math.round(performance.now() - selectionStart);
           signal.throwIfAborted();
           assert.deepEqual(withoutToolText(after), withoutToolText(before), 'Selector changed non-tool text or structure');
           record.beforeBytes = Buffer.byteLength(JSON.stringify(before));
@@ -226,9 +250,13 @@ async function arm(phase, instruction) {
           const capture = captureRequest({ sessionId: manager.getSessionId(), requestId: `${phase}-${turn}`,
             branch: manager.getBranch(), payload: wire, model, source: sourceSnapshot });
           await save(`${phase}-${turn}-request.json`, wire);
+          signal.throwIfAborted(); guard();
           record.dispatched = true; record.wireSha256 = sha(JSON.stringify(wire)); captures.push(capture);
-          const response = await nativeFetch(url, { ...init, signal, redirect: 'error' });
-          record.httpStatus = response.status; record.requestToHeadersMs = Math.round(performance.now() - requestStart);
+          const dispatchStart = performance.now();
+          record.preDispatchMs = Math.round(dispatchStart - requestStart);
+          const response = await nativeFetch(url, { ...init,
+            signal: AbortSignal.any([signal, AbortSignal.timeout(bounds.requestMs)]), redirect: 'error' });
+          record.httpStatus = response.status; record.requestToHeadersMs = Math.round(performance.now() - dispatchStart);
           record.dispatchedAt = performance.now();
           return tapResponse(response, record, controller, prices, bounds.responseBytes);
         },
@@ -253,23 +281,36 @@ async function arm(phase, instruction) {
     if (outcome.requests.some((r) => r.dispatched && !r.usage)) report.accountingComplete = false;
     const entries = manager.getBranch();
     const records = (kind) => entries.filter((e) => e.type === 'custom' && e.customType === kind).map((e) => e.data);
-    outcome.stops = records(STOP_ENTRY); outcome.judgeStarts = records(JUDGE_START_ENTRY); outcome.judgeResults = records(JUDGE_RESULT_ENTRY);
+    outcome.stops = records(STOP_ENTRY); outcome.deferrals = records(DEFERRAL_ENTRY);
     outcome.selections = records(SELECTION_ENTRY); outcome.nativeEdits = entries.filter((e) => e.type === 'context_edit');
     outcome.extensionUsage = records(USAGE_ENTRY);
-    outcome.briefStarts = records(BRIEF_START_ENTRY); outcome.briefResults = records(BRIEF_RESULT_ENTRY);
-    outcome.briefAccountingComplete = outcome.briefStarts.length === outcome.briefResults.length
-      && outcome.briefResults.every((r) => r.pricedCostUsd !== null);
-    outcome.briefCatalogCostUsd = phase === 'selector' ? report.briefRequests.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0) : 0;
-    outcome.briefMs = phase === 'selector' ? report.briefRequests.reduce((n, r) => n + r.elapsedMs, 0) : 0;
-    if (!outcome.briefAccountingComplete) report.accountingComplete = false;
+    const starts = records(INFERENCE_START_ENTRY), results = records(INFERENCE_RESULT_ENTRY);
+    outcome.sketchStarts = starts.filter((r) => r.kind === 'sketch');
+    outcome.sketchResults = results.filter((r) => r.kind === 'sketch');
+    outcome.rankingStarts = starts.filter((r) => r.kind === 'ranking');
+    outcome.rankingResults = results.filter((r) => r.kind === 'ranking');
+    const sketches = report.sketchRequests.filter((r) => r.phase === phase);
+    const judges = report.judgeRequests.filter((r) => r.phase === phase);
+    const accounted = (begun, ended) => begun.length === ended.length
+      && new Set(begun.map((r) => r.operationId)).size === begun.length
+      && begun.every((start) => ended.filter((r) => r.operationId === start.operationId).length === 1)
+      && ended.every((r) => Number.isFinite(r.pricedCostUsd) && r.pricedCostUsd >= 0);
+    outcome.sketchCatalogCostUsd = sketches.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0);
+    outcome.sketchMs = sketches.reduce((n, r) => n + r.elapsedMs, 0);
+    outcome.sketchAccountingComplete = accounted(outcome.sketchStarts, outcome.sketchResults)
+      && outcome.sketchResults.filter((r) => r.completionInvoked).length === sketches.length
+      && sketches.every((r) => r.accountingComplete)
+      && Math.abs(outcome.sketchResults.reduce((n, r) => n + (r.pricedCostUsd ?? 0), 0) - outcome.sketchCatalogCostUsd) < 1e-9;
+    outcome.rankingAccountingComplete = accounted(outcome.rankingStarts, outcome.rankingResults)
+      && outcome.rankingResults.filter((r) => r.sent).length === judges.length;
+    if (!outcome.sketchAccountingComplete || !outcome.rankingAccountingComplete) report.accountingComplete = false;
+    outcome.dispatchRefusals = [...sketches, ...judges].filter((r) => r.stopClass === 'dispatch-refused');
     const last = session?.messages.findLast((m) => m.role === 'assistant');
-    outcome.completed = !outcome.failure && !fatal && !outcome.stops.length && last?.stopReason === 'stop';
-    outcome.failure ??= fatal ?? outcome.stops.at(-1)?.reason ?? (outcome.completed ? null : 'No final response');
-    outcome.judgeAccountingComplete = outcome.judgeStarts.length === outcome.judgeResults.length && outcome.judgeResults.every((r) => r.pricedCostUsd !== null);
-    if (!outcome.judgeAccountingComplete) report.accountingComplete = false;
+    outcome.completed = !outcome.failure && !fatal && !outcome.stops.length && report.accountingComplete && last?.stopReason === 'stop';
+    outcome.failure ??= fatal ?? outcome.stops.at(-1)?.reason ?? (outcome.completed ? null : 'No accounted final response');
     outcome.codingCatalogCostUsd = outcome.requests.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0);
-    outcome.judgeKnownCostUsd = outcome.judgeResults.reduce((n, r) => n + (r.pricedCostUsd ?? 0), 0);
-    outcome.judgeMs = outcome.judgeResults.reduce((n, r) => n + r.latencyMs, 0);
+    outcome.rankingKnownCostUsd = outcome.rankingResults.reduce((n, r) => n + (r.pricedCostUsd ?? 0), 0);
+    outcome.rankingMs = outcome.rankingResults.reduce((n, r) => n + r.latencyMs, 0);
     await save(`${phase}-branch.json`, entries);
     await save(`${phase}-captures.json`, captures);
     session?.dispose(); deadline.removeEventListener('abort', abortRun);
@@ -286,22 +327,24 @@ async function arm(phase, instruction) {
 }
 try {
   const sourceHashes = {};
-  for (const file of ['run.mjs', 'brief.mjs', 'codex-accounting.mjs', 'sandbox.ts', 'tool-output.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, root)));
+  for (const file of ['run.mjs', 'sketch.mjs', 'codex-accounting.mjs', 'sandbox.ts', 'tool-output.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, root)));
   for (const file of await readdir(new URL('../../src/', root))) if (file.endsWith('.ts')) sourceHashes[`src/${file}`] = sha(await readFile(new URL(`../../src/${file}`, root)));
-  for (const file of ['test/brief-fixture.ts', 'test/history-fixture.ts', 'package-lock.json']) {
+  for (const file of ['package-lock.json']) {
     sourceHashes[file] = sha(await readFile(new URL(`../../${file}`, root)));
   }
   const instruction = task.problemStatement;
   await save('agent-task.json', task);
-  await save('manifest.json', { mode, instanceId: task.instanceId, base: task.baseCommit, image: task.image, piVersion: pkg.version,
-    model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: ['control', 'selector'], bounds, budget, selection, judgePolicy,
+  await save('manifest.json', { version: 2, lifecycle: WORKING_POLICY, mode, instanceId: task.instanceId, base: task.baseCommit, image: task.image, piVersion: pkg.version,
+    model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: ['control', 'selector'], orders: { control: 'capture-order', selector: 'jev' }, bounds, capacity, target, ranking, decision,
     taskSha256: sha(JSON.stringify(task)), instructionSha256: sha(instruction), sourceHashes, prices, systemPrompt,
-    brief: { model: 'openai-codex/gpt-6-luna', reasoning: 'low', prices: pinnedBrief.cost,
+    sketch: { model: 'openai-codex/gpt-6-luna', reasoning: 'low', prices: pinnedSketch.cost,
       mode: live ? 'live' : 'scripted-http-real-sdk', outputTokenCapEnforced: false },
     limits: ['One development task, one fresh trajectory per arm. Not a causal quality/cost estimate.',
-      'Control uses the same budget/logging extension in no-selection mode; neither arm uses normal Pi resources or compaction.',
+      'Both arms use the working-set lifecycle, sketch and candidate planner. Control uses capture order without Jev calls. Neither arm uses normal Pi resources or compaction.',
       'Fixed order, different session/cache keys do not guarantee independent provider caches. Natural trajectories differ.',
-      'Usage-anchored soft pressure with conservative byte fallback; relevance cutoffs are uncalibrated. No retuning/retry in this run.',
+      'Token-denominated estimates and a separate transport-byte ceiling. Ranking priority is not a safety judgment. No retuning/retry in this run.',
+      'Shared sketch and run caps can interfere across arms. Natural trajectories and remaining decision time can change candidate pools.',
+      'Pre-dispatch inference refusals are recorded separately but retain the conservative branch-persistent accounting stop.',
       'Catalog costs are estimates, not subscription charges. Between-request cost stop can overshoot by one response, not a hard dollar cap. Output reserve is not a generation cap.',
       'Private local ignored artifacts, including opaque reasoning. No automatic publication or backup.',
       'Native grading separately checks patches; incomplete trajectories remain incomplete even if their patches pass.'] });
@@ -315,39 +358,53 @@ try {
     assert.ok(report.completed, JSON.stringify(report.arms.map((a) => a.failure)));
     assert.equal(report.requests.filter((r) => r.dispatched).length, 10);
     assert.ok(report.judgeDispatches > 0);
-    assert.equal(report.briefRequests.length, 1, 'Retirement and restoration share the brief across tool-only turns');
-    assert.ok(report.briefRequests.every((r) => r.dispatched && r.usage && r.stopReason === 'stop'));
-    assert.ok(report.arms[1].briefCatalogCostUsd > 0);
-    assert.equal(report.arms[0].nativeEdits.length, 0);
-    assert.ok(report.arms[1].nativeEdits.length > 0);
-    assert.ok(report.arms[1].requests.some((r) => r.changedOutputs.length > 0));
-    const selected = JSON.parse(await readFile(new URL('selector-captures.json', run)));
-    assert.ok(selected.some((c) => c.evidence.some((e) => e.visible && e.mapping.span)), 'Real reads must map to source');
-    const retired = selected.flatMap((c) => c.evidence.filter((e) => !e.visible && e.mapping.span).map((e) => e.id));
-    assert.ok(retired.length > 0 && selected.at(-1).evidence.some((e) => e.visible && retired.includes(e.id)), 'Mapped read must retire and restore without rereading');
+    assert.equal(report.sketchRequests.length, 2, 'Each arm shares one sketch across tool-only turns');
+    assert.ok(report.sketchRequests.every((r) => r.dispatched && r.usage && r.stopReason === 'stop'));
+    assert.equal(report.arms[0].rankingStarts.length, 0);
+    assert.equal(report.arms[0].rankingResults.length, 0);
+    assert.ok(report.judgeRequests.every((r) => r.phase === 'selector'));
+    for (const outcome of report.arms) {
+      assert.ok(outcome.sketchCatalogCostUsd > 0 && outcome.sketchAccountingComplete && outcome.rankingAccountingComplete);
+      assert.ok(outcome.nativeEdits.length > 0);
+      assert.ok(outcome.requests.some((r) => r.changedOutputs.length > 0));
+      assert.ok(outcome.selections.every((s) => s.reconsideration.order === (outcome.phase === 'control' ? 'capture-order' : 'jev')));
+      const selected = JSON.parse(await readFile(new URL(`${outcome.phase}-captures.json`, run)));
+      assert.ok(selected.some((c) => c.evidence.some((e) => e.visible && e.mapping.span)), 'Real reads must map to source');
+      const retired = selected.flatMap((c) => c.evidence.filter((e) => !e.visible && e.mapping.span).map((e) => e.id));
+      assert.ok(retired.length > 0 && selected.at(-1).evidence.some((e) => e.visible && retired.includes(e.id)), 'Mapped read must retire and restore without rereading');
+    }
     assert.equal(await readFile(new URL('control.patch', run), 'utf8'), await readFile(new URL('selector.patch', run), 'utf8'));
   } else if (mode === '--local-invalid-usage') {
     assert.equal(report.accountingComplete, false); assert.equal(report.requests.filter((r) => r.dispatched).length, 1);
-  } else if (mode === '--local-brief-invalid-usage') {
+  } else if (mode === '--local-sketch-invalid-usage') {
     assert.equal(report.accountingComplete, false);
     assert.equal(report.arms[0].completed, true);
     assert.equal(report.arms[1].completed, false);
-    assert.equal(report.briefRequests.filter((r) => r.dispatched).length, 1);
-    assert.equal(report.arms[1].requests.filter((r) => r.dispatched).length, 2, 'Two ordinary turns precede the first demanded brief');
+    assert.equal(report.sketchRequests.filter((r) => r.phase === 'selector' && r.dispatched).length, 1);
+    assert.equal(report.arms[1].requests.filter((r) => r.dispatched).length, 2, 'Two ordinary turns precede the first demanded sketch');
     assert.equal(report.judgeDispatches, 0);
   } else if (mode === '--local-judge-failure') {
     assert.equal(report.arms[0].completed, true); assert.equal(report.arms[1].completed, false);
     assert.equal(report.judgeDispatches, 1); assert.equal(report.arms[1].nativeEdits.length, 0);
-    assert.match(report.arms[1].stops.at(-1)?.reason, /Jev evaluation failed/);
+    assert.match(report.arms[1].stops.at(-1)?.reason, /Ranking request has unknown cost/);
+    assert.equal(report.accountingComplete, false);
+  } else if (mode === '--local-judge-invalid') {
+    assert.equal(report.accountingComplete, true);
+    assert.ok(report.arms.every((a) => a.completed));
+    assert.ok(report.arms[1].deferrals.length > 0);
+    assert.ok(report.arms[1].rankingResults.some((r) => r.outcome === 'invalid_response' && r.pricedCostUsd > 0));
+    assert.equal(report.arms[1].nativeEdits.length, 0);
+    assert.ok(report.arms[1].requests.every((r) => r.changedOutputs.length === 0));
   } else if (mode === '--local-request-cap') {
     assert.ok(report.arms.every((a) => !a.completed && a.failure === 'Request ceiling'));
     assert.equal(report.requests.filter((r) => r.dispatched).length, 4);
+    assert.equal(report.sketchRequests.length, 0); assert.equal(report.judgeDispatches, 0);
     assert.ok(report.requests.every((r) => r.stopReason === 'toolUse' && r.piUsage.input > 0));
   }
   report.contractsPassed = !live;
 } catch (e) { report.failure = errorText(e); process.exitCode = 1; }
 finally {
-  if ([...report.requests, ...report.briefRequests].some((r) => r.dispatched && !r.usage)) report.accountingComplete = false;
+  if ([...report.requests, ...report.sketchRequests].some((r) => r.dispatched && !r.usage)) report.accountingComplete = false;
   globalThis.fetch = nativeFetch;
   await save('report.json', report);
   if (server) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }

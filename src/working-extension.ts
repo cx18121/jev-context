@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai';
+import type { Api, AssistantMessage, Model, Usage } from '@earendil-works/pi-ai';
 import type { ExtensionContext, ExtensionFactory, SessionEntry, SessionManager } from '@earendil-works/pi-coding-agent';
 import type { CapacityLimits, CapacityMeasurement } from './budget.ts';
 import { commitSelection, readHistory, SELECTION_ENTRY, type HistoryView } from './history.ts';
@@ -18,6 +18,25 @@ import { underPressure, validateWorkingSetTarget, type WorkingSetOrder, type Wor
 
 export const WORKING_POLICY = 'working-set-v1';
 export const SKETCH_ENTRY = 'jev-context/sketch';
+export const STOP_ENTRY = 'jev-context/stop';
+export const USAGE_ENTRY = 'jev-context/usage';
+export const DEFERRAL_ENTRY = 'jev-context/deferral';
+
+export interface UsageRecord {
+  version: 1;
+  policy: typeof WORKING_POLICY;
+  requestId: string;
+  provider: string;
+  model: string;
+  stopReason: AssistantMessage['stopReason'];
+  managerStopped: boolean;
+  cancelled: boolean;
+  responseReceived: boolean;
+  capacity: CapacityMeasurement | null;
+  usageAvailable: boolean;
+  usageSource: 'pi-normalized';
+  usage: Usage;
+}
 export const INFERENCE_START_ENTRY = 'jev-context/inference-start';
 export const INFERENCE_RESULT_ENTRY = 'jev-context/inference-result';
 
@@ -123,7 +142,7 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
       current.cancelled = ctx.signal?.aborted ?? false;
       ctx.abort();
       const reason = error instanceof Error ? error.message : String(error);
-      if (!writeFailed && sameBranch(ctx, current)) append(ctx, current, 'jev-context/stop', {
+      if (!writeFailed && sameBranch(ctx, current)) append(ctx, current, STOP_ENTRY, {
         version: 1, policy: WORKING_POLICY, requestId: current.id, kind: current.cancelled ? 'cancelled' : kind, reason, capacity: current.measured ?? null,
       });
       if (!current.cancelled) ctx.ui.notify(`jev-context stopped: ${reason}`, 'error');
@@ -310,7 +329,7 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
         return send(selected.payload);
       } catch (error) {
         if (error instanceof IncompleteSelection && current.measured?.admitted && !ctx.signal?.aborted && sameBranch(ctx, current) && !writeFailed) {
-          append(ctx, current, 'jev-context/deferral', { version: 1, policy: WORKING_POLICY, requestId: current.id,
+          append(ctx, current, DEFERRAL_ENTRY, { version: 1, policy: WORKING_POLICY, requestId: current.id,
             reason: error.message, capacity: current.measured });
           return send(event.payload);
         }
@@ -324,13 +343,13 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
       attempt = undefined;
       anchor = undefined;
       if (writeFailed || !sameBranch(ctx, current)) return;
-      append(ctx, current, 'jev-context/usage', { version: 1, policy: WORKING_POLICY, requestId: current.id,
+      append(ctx, current, USAGE_ENTRY, { version: 1, policy: WORKING_POLICY, requestId: current.id,
         provider: message.provider, model: message.model, stopReason: message.stopReason,
         managerStopped: current.stopped && !current.cancelled,
         cancelled: current.cancelled || (ctx.signal?.aborted === true && !current.stopped),
         responseReceived: current.responseReceived, capacity: current.measured ?? null,
         usageAvailable: [message.usage.input, message.usage.output, message.usage.cacheRead, message.usage.cacheWrite].some((value) => value > 0),
-        usageSource: 'pi-normalized', usage: structuredClone(message.usage) });
+        usageSource: 'pi-normalized', usage: structuredClone(message.usage) } satisfies UsageRecord);
       if (current.sent && !current.stopped && !ctx.signal?.aborted && current.responseReceived &&
           (message.stopReason === 'stop' || message.stopReason === 'toolUse') &&
           message.provider === current.sent.model.provider && message.model === current.sent.model.id && message.api === current.sent.model.api) {
