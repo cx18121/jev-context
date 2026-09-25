@@ -3,7 +3,7 @@ import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AssistantMessage, Model } from '@earendil-works/pi-ai';
 import { BRIEF_SOURCE_ENTRY, taskSources, updateBrief, validateBriefConfig, type BriefResult } from '../src/brief-session.ts';
-import { planBriefUpdate } from '../src/task-brief.ts';
+import { applyBriefUpdate, planBriefUpdate, validateTaskBrief } from '../src/task-brief.ts';
 import { assistant, result, zeroUsage } from './history-fixture.ts';
 import { createPiFixture } from './pi-fixture.ts';
 
@@ -37,8 +37,52 @@ test('session sources retain identities and authority but exclude reasoning and 
   assert.deepEqual(extracted[0], { ...sources[0], id: userId });
   assert.deepEqual(extracted[1], { id: systemId, role: 'system', text: 'Rendered system instructions.' });
   assert.equal(extracted[2]!.role, 'assistant');
-  assert.match(extracted[2]!.text, /parser.ts/);
-  assert.doesNotMatch(JSON.stringify(extracted), /PRIVATE_|OPAQUE_|TOOL_BODY_/);
+  assert.equal(extracted[2]!.text, 'I will inspect the parser.');
+  assert.doesNotMatch(JSON.stringify(extracted), /PRIVATE_|OPAQUE_|TOOL_BODY_|parser.ts/);
+});
+
+test('tool-only activity leaves the brief current; prose and instruction changes still advance it', () => {
+  const manager = SessionManager.inMemory();
+  manager.appendMessage({ role: 'user', content: sources[0]!.text, timestamp: 1 });
+  const original = taskSources(manager.getBranch());
+  const brief = applyBriefUpdate(planBriefUpdate(original, null)!, { ...output,
+    add: [{ ...output.add[0]!, references: [{ sourceId: original[0]!.id, quote: sources[0]!.text }] }] }, original);
+  const command = 'grep -n "restructuredtext.parse\\|doc_field\\|Variables" tests/test_domain_py.py | tail -60';
+  for (let i = 0; i < 9; i++) {
+    manager.appendMessage({ ...assistant([{ type: 'toolCall', id: `grep${i}`, name: 'bash', arguments: { command } }]),
+      content: [{ type: 'text', text: ' \n ' }, { type: 'thinking', thinking: 'private', thinkingSignature: 'opaque' },
+        { type: 'toolCall', id: `grep${i}`, name: 'bash', arguments: { command } }] });
+    manager.appendMessage(result(`grep${i}`, 'Changing observations', { toolName: 'bash' }));
+    assert.deepEqual(taskSources(manager.getBranch()), original);
+    assert.equal(planBriefUpdate(taskSources(manager.getBranch()), brief), null);
+  }
+  manager.appendMessage({ role: 'bashExecution', command, output: 'Manual shell output', exitCode: 0,
+    cancelled: false, truncated: false, timestamp: 2 });
+  assert.deepEqual(taskSources(manager.getBranch()), original);
+  const text = `Inspecting the parser. Exact command: ${command}`;
+  const proseId = manager.appendMessage({ ...assistant(), content: [{ type: 'text', text },
+    { type: 'toolCall', id: 'mixed', name: 'bash', arguments: { command } }] });
+  const changed = taskSources(manager.getBranch());
+  assert.deepEqual(changed.at(-1), { id: proseId, role: 'assistant', text });
+  const updated = applyBriefUpdate(planBriefUpdate(changed, brief)!, {
+    retain: brief.items.map((item) => item.id), add: [], supersede: [],
+    activity: [{ text: 'Inspecting the parser.', references: [{ sourceId: proseId, quote: command }] }],
+  }, changed);
+  assert.equal(updated.activity[0]!.references[0]!.quote, command);
+  const systemId = manager.appendCustomEntry(BRIEF_SOURCE_ENTRY, { version: 1, text: 'Do not edit tests.' });
+  const userId = manager.appendMessage({ role: 'user', content: 'Fix only the Python domain.', timestamp: 3 });
+  assert.deepEqual(planBriefUpdate(taskSources(manager.getBranch()), updated)!.sources.map((s) => s.id), [systemId, userId]);
+});
+
+test('old tool-derived brief prefixes are incompatible, not silently reinterpreted', () => {
+  const manager = SessionManager.inMemory();
+  const userId = manager.appendMessage({ role: 'user', content: sources[0]!.text, timestamp: 1 });
+  const call = { type: 'toolCall' as const, id: 'old', name: 'read', arguments: { path: 'parser.ts' } };
+  const assistantId = manager.appendMessage(assistant([call]));
+  const oldSources = [{ ...sources[0]!, id: userId },
+    { id: assistantId, role: 'assistant' as const, text: JSON.stringify({ tool: call.name, arguments: call.arguments }) }];
+  const oldBrief = applyBriefUpdate(planBriefUpdate(oldSources, null)!, { retain: [], add: [], supersede: [], activity: [] }, oldSources);
+  assert.throws(() => validateTaskBrief(oldBrief, taskSources(manager.getBranch())), /source prefix changed/);
 });
 
 test('brief requests force bounded no-tool, no-retry SSE inference and record normalized catalog cost', async () => {

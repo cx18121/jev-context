@@ -28,7 +28,7 @@ function contentText(content: string | { type: string; text?: string }[]): strin
   return typeof content === 'string' ? content : content.filter((part) => part.type === 'text').map((part) => part.text).join('\n');
 }
 
-/** Sources preserve authority and branch identities; opaque reasoning and tool bodies never enter the updater. */
+/** Persistent task text only. Tool activity belongs to the judge's recent window, not brief inference. */
 export function taskSources(branch: SessionEntry[]): BriefSource[] {
   const sources: BriefSource[] = [];
   for (const entry of branch) {
@@ -45,11 +45,8 @@ export function taskSources(branch: SessionEntry[]): BriefSource[] {
     if (message.role === 'user' || message.role === 'custom') {
       sources.push({ id: entry.id, role: message.role === 'user' ? 'user' : 'extension', text: contentText(message.content) });
     } else if (message.role === 'assistant' && message.stopReason !== 'error' && message.stopReason !== 'aborted') {
-      const text = message.content.flatMap((block) => block.type === 'text' ? [block.text]
-        : block.type === 'toolCall' ? [JSON.stringify({ tool: block.name, arguments: block.arguments })] : []).join('\n');
-      sources.push({ id: entry.id, role: 'assistant', text });
-    } else if (message.role === 'bashExecution' && !message.excludeFromContext) {
-      sources.push({ id: entry.id, role: 'extension', text: JSON.stringify({ command: message.command, output: 'omitted', exitCode: message.exitCode }) });
+      const text = contentText(message.content);
+      if (text.trim()) sources.push({ id: entry.id, role: 'assistant', text });
     }
     // System messages are deltas. The provider-rendered instruction snapshot above owns their current meaning.
   }

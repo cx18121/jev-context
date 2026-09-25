@@ -314,7 +314,7 @@ try {
     assert.ok(report.completed, JSON.stringify(report.arms.map((a) => a.failure)));
     assert.equal(report.requests.filter((r) => r.dispatched).length, 10);
     assert.ok(report.judgeDispatches > 0);
-    assert.equal(report.briefRequests.length, 2, 'Only retirement and restoration need brief updates');
+    assert.equal(report.briefRequests.length, 1, 'Retirement and restoration share the brief across tool-only turns');
     assert.ok(report.briefRequests.every((r) => r.dispatched && r.usage && r.stopReason === 'stop'));
     assert.ok(report.arms[1].briefCatalogCostUsd > 0);
     assert.equal(report.arms[0].nativeEdits.length, 0);

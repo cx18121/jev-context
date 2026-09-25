@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { createContextExtension, STOP_ENTRY } from '../src/extension.ts';
-import { BRIEF_ENTRY, BRIEF_RESULT_ENTRY, BRIEF_SOURCE_ENTRY, BRIEF_START_ENTRY } from '../src/brief-session.ts';
+import { BRIEF_ENTRY, BRIEF_RESULT_ENTRY, BRIEF_SOURCE_ENTRY, BRIEF_START_ENTRY, taskSources } from '../src/brief-session.ts';
+import { applyBriefUpdate, planBriefUpdate } from '../src/task-brief.ts';
 import { commitSelection, readHistory, SELECTION_ENTRY } from '../src/history.ts';
 import { appendExchange, result, zeroUsage } from './history-fixture.ts';
 import { scriptedBrief } from './brief-fixture.ts';
@@ -40,6 +43,36 @@ test('fitting turns without an archive make no brief requests or instruction sna
       assert.deepEqual(run.errors, []);
     } finally { await f.close(); await judge.close(); }
   }
+});
+
+test('repeated pressured tool turns reuse the brief without suppressing judgment or user corrections', async () => {
+  const f = await createPiFixture(), judge = await createJevFixture();
+  try {
+    await writeFile(join(f.directory, 'current.txt'), 'Current API contract.');
+    const manager = SessionManager.inMemory(f.directory);
+    seed(manager);
+    f.reportInputTokens(5000);
+    for (let i = 0; i < 3; i++) f.respondWithTools([{ id: `fresh${i}`, name: 'read', arguments: { path: 'current.txt' } }]);
+    const brief = scriptedBrief(f.model), complete = brief.complete!;
+    let calls = 0;
+    brief.complete = (...args) => { calls++; return complete(...args); };
+    const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1', budget,
+      selection: { ...selection, workingContextLimit: 3000 }, brief, jev: judge.config })], manager, ['read']);
+    await run.session.prompt('Read current.txt and finish the API contract.');
+    assert.equal(f.requests.length, 4);
+    assert.equal(judge.requests.length, 4);
+    assert.equal(calls, 1);
+    assert.equal(entries(manager, BRIEF_ENTRY).length, 1);
+    assert.equal(entries(manager, SELECTION_ENTRY).length, 5); // Seed plus every fresh tool event.
+    const state = JSON.stringify(judge.requests.at(-1)!.state);
+    assert.match(state, /Current API contract/);
+    assert.match(state, /fresh2/);
+    await run.session.prompt('Correction: also preserve backward compatibility.');
+    assert.equal(calls, 2);
+    const latest = entries(manager, BRIEF_ENTRY).at(-1)!;
+    assert.match(JSON.stringify(latest), /also preserve backward compatibility/);
+    assert.deepEqual(run.errors, []);
+  } finally { await f.close(); await judge.close(); }
 });
 
 test('soft pressure with no eligible observations checkpoints without a brief-pending deferral', async () => {
@@ -107,6 +140,30 @@ test('incomplete brief makes one bounded update, preserves evidence and events, 
     assert.equal(entries(manager, BRIEF_SOURCE_ENTRY).length, 1);
     assert.equal(entries(manager, BRIEF_START_ENTRY).length, calls);
     assert.equal(entries(manager, BRIEF_RESULT_ENTRY).length, calls);
+    assert.deepEqual(run.errors, []);
+  } finally { await f.close(); await judge.close(); }
+});
+
+test('incompatible saved tool-derived briefs preserve evidence without a paid rescan', async () => {
+  const f = await createPiFixture(), judge = await createJevFixture();
+  try {
+    const manager = SessionManager.inMemory(f.directory);
+    const old = seed(manager);
+    const callEntry = manager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'assistant')!;
+    const legacySources = [...taskSources(manager.getBranch()),
+      { id: callEntry.id, role: 'assistant' as const, text: '{"tool":"read","arguments":{"path":"old.txt"}}' }];
+    manager.appendCustomEntry(BRIEF_ENTRY, applyBriefUpdate(planBriefUpdate(legacySources, null)!, {
+      retain: [], add: [], supersede: [], activity: [],
+    }, legacySources));
+    const brief = scriptedBrief(f.model);
+    brief.complete = async () => { assert.fail('Incompatible prefix must not silently restart scanning'); };
+    const run = await f.session((m) => [createContextExtension(m, { policy: 'jev-select-v1', budget, selection, brief, jev: judge.config })], manager);
+    await run.session.prompt('Continue the API task.');
+    assert.equal(f.requests.length, 1);
+    assert.equal(judge.requests.length, 0);
+    assert.equal(entries(manager, BRIEF_START_ENTRY).length, 0);
+    assert.equal(entries(manager, SELECTION_ENTRY).length, 1);
+    assert.deepEqual(readHistory(manager.getBranch(), manager.buildSessionProjection().messages).retiredIds, [old]);
     assert.deepEqual(run.errors, []);
   } finally { await f.close(); await judge.close(); }
 });
