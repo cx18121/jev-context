@@ -3,7 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { buildSessionProjection, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import { readHistory, retirementText, SELECTION_ENTRY } from '../src/history.ts';
-import { retrieveArchive, RETRIEVAL_VERSION } from '../src/retrieval.ts';
+import { exploreArchive, EXPLORATION_VERSION } from '../src/retrieval.ts';
 import { retrievalScenarios, type RetrievalScenario } from './retrieval-fixtures.ts';
 
 export function prepareRetrievalFixture(scenario: RetrievalScenario) {
@@ -47,15 +47,15 @@ export function prepareRetrievalFixture(scenario: RetrievalScenario) {
 
 export function evaluateRetrieval(scenario: RetrievalScenario) {
   const { history, labels } = prepareRetrievalFixture(scenario);
-  // Authored query diagnostic, not a test of automatic brief quality.
+  // Authored query diagnostic, not a test of automatic sketch quality.
   const query = [...scenario.users, scenario.action, scenario.latestPath].join('\n');
   const known = new Set(labels.values());
   if (new Set(scenario.relevant).size !== scenario.relevant.length || scenario.relevant.some((id) => !known.has(id))) {
     throw new Error('Relevant labels must be unique members of the archive');
   }
-  const shortlist = retrieveArchive(history, query, scenario.limit);
-  // The uncapped lexical ranking diagnoses cutoff misses, not semantic relevance.
-  const uncapped = retrieveArchive(history, query, Math.max(1, history.retiredIds.length));
+  const shortlist = exploreArchive(history, query, scenario.limit);
+  // A full page distinguishes lexical misses from matches beyond the first page.
+  const uncapped = exploreArchive(history, query, Math.max(1, history.retiredIds.length));
   const selected = new Set(shortlist.candidates.map((item) => labels.get(item.evidence.id)!));
   const matches = new Set(uncapped.candidates.map((item) => labels.get(item.evidence.id)!));
   const relevant = new Set(scenario.relevant);
@@ -63,17 +63,18 @@ export function evaluateRetrieval(scenario: RetrievalScenario) {
   return {
     id: scenario.id, reason: scenario.reason, limit: scenario.limit, poolSize: shortlist.poolSize,
     queryTerms: shortlist.queryTerms, matchedCount: shortlist.matchedCount,
+    pageIds: shortlist.pageIds.map((id) => labels.get(id)!),
     candidates: shortlist.candidates.map((item) => ({ id: labels.get(item.evidence.id)!, score: item.score, matchedTerms: item.matchedTerms })),
     fullArchiveRelevant: scenario.relevant, found,
-    missed: scenario.relevant.filter((id) => !selected.has(id)).map((id) => ({ id, cause: matches.has(id) ? 'shortlist-cutoff' : 'no-lexical-match' })),
+    missed: scenario.relevant.filter((id) => !selected.has(id)).map((id) => ({ id, cause: matches.has(id) ? 'outside-page' : 'no-lexical-match' })),
     irrelevantSelected: [...selected].filter((id) => !relevant.has(id)),
     recall: relevant.size ? found.length / relevant.size : null,
   };
 }
 
 export function retrievalReport() {
-  return { version: 'retrieval-diagnostic-v1', lookupVersion: RETRIEVAL_VERSION,
-    evidenceLimit: 'Authored development fixtures. Full archive is a coverage reference, not a model oracle. No Jev, agent actions, quality, latency or cost measurements.',
+  return { version: 'retrieval-diagnostic-v2', lookupVersion: EXPLORATION_VERSION,
+    evidenceLimit: 'Authored development fixtures measuring the first capture-order page, not eventual exploration recall or sketch quality. Full archive is a coverage reference, not a model oracle. No Jev, agent actions, quality, latency or cost measurements.',
     cases: retrievalScenarios().map(evaluateRetrieval) };
 }
 

@@ -18,7 +18,28 @@ export function prepareWorkingSetView(
   }
   const source = structuredClone(payload);
   const mapped = mapProviderEvidence(source, messages, history.evidence, model);
-  if (mapped.length !== readProviderPayload(source, model.api).items.filter((item) => isToolOutput(item, model.api)).length) {
+  const accounted = new Set(mapped.map((item) => item.messageIndex));
+  const outputs = readProviderPayload(source, model.api).items;
+  const resultIds = new Set(messages.flatMap((message) => message.role === 'toolResult' ? [message.toolCallId] : []));
+  // Pi supplies these wire-only placeholders after interrupted tool batches. They are fixed
+  // floor content, never archived evidence or candidates for retirement.
+  for (const message of messages) {
+    if (message.role !== 'assistant' || message.stopReason === 'error' || message.stopReason === 'aborted') continue;
+    for (const call of message.content) {
+      if (call.type !== 'toolCall' || resultIds.has(call.id)) continue;
+      const codex = model.api === 'openai-codex-responses';
+      const id = codex ? call.id.split('|')[0]! : call.id;
+      const matches = outputs.flatMap((item, index) => isToolOutput(item, model.api) &&
+        item[codex ? 'call_id' : 'tool_call_id'] === id ? [index] : []);
+      const index = matches[0];
+      if (matches.length !== 1 || index === undefined || accounted.has(index) ||
+          outputs[index]![codex ? 'output' : 'content'] !== 'No result provided') {
+        throw new Error('Invalid provider placeholder for an interrupted tool call');
+      }
+      accounted.add(index);
+    }
+  }
+  if (outputs.some((item, index) => isToolOutput(item, model.api) && !accounted.has(index))) {
     throw new Error('Provider has unaccounted tool outputs');
   }
   const archive = new Set(archiveIds);

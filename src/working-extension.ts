@@ -113,7 +113,6 @@ function activity(history: HistoryView) {
   return { focusHash: hash(full), recent: { text, truncated: bytes.length > 3800, originalBytes: bytes.length } };
 }
 
-/** New lifecycle integration boundary. Legacy callers migrate only after its wire contracts pass. */
 export function createWorkingContextExtension(manager: SessionManager, options: WorkingContextOptions): ExtensionFactory {
   validateTextCompletionConfig(options.sketch);
   if (options.order.kind === 'jev') {

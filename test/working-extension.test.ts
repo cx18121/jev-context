@@ -67,6 +67,37 @@ test('fitting ordinary requests skip all decision inference and anchor subsequen
   } finally { await f.close(); }
 });
 
+test('both orders honor historical inference accounting before fitting requests', async () => {
+  const journals = [
+    { kind: 'brief', id: { updateId: 'legacy' } },
+    { kind: 'judge', id: { requestId: 'legacy' } },
+    { kind: 'judge', id: { requestId: 'legacy', batchIndex: 2 } },
+  ];
+  for (const order of ['jev', 'capture-order'] as const) {
+    for (const journal of journals) {
+      for (const outcome of ['unmatched', 'unknown', 'priced'] as const) {
+        const f = await fixture();
+        try {
+          if (order === 'capture-order') f.options.order = { kind: order };
+          const manager = SessionManager.inMemory(f.pi.directory);
+          manager.appendCustomEntry(`jev-context/${journal.kind}-start`, journal.id);
+          if (outcome !== 'unmatched') manager.appendCustomEntry(`jev-context/${journal.kind}-result`, {
+            ...journal.id, pricedCostUsd: outcome === 'priced' ? 0.001 : null,
+          });
+          const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
+          await run.session.prompt('A fitting request.');
+          assert.equal(f.pi.requests.length, Number(outcome === 'priced'));
+          assert.equal(f.sketches(), 0);
+          assert.equal(f.judge.requests.length, 0);
+          const stops = entries(manager, 'jev-context/stop');
+          assert.equal(stops.length, Number(outcome !== 'priced'));
+          if (outcome !== 'priced') assert.match(JSON.stringify(stops), /unknown cost/);
+        } finally { await f.close(); }
+      }
+    }
+  }
+});
+
 test('pressure ranks all eligible residents and commits whole edits to the actual SDK wire', async () => {
   const f = await fixture();
   try {

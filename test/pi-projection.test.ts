@@ -3,12 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { createContextExtension, STOP_ENTRY } from '../src/extension.ts';
-import { SELECTION_ENTRY, type HistoryView } from '../src/history.ts';
+import { createWorkingContextExtension, STOP_ENTRY } from '../src/working-extension.ts';
+import { readHistory, SELECTION_ENTRY, type HistoryView } from '../src/history.ts';
+import { captureOptions } from './working-fixture.ts';
 import { seedHistory } from './history-fixture.ts';
 import { createPiFixture } from './pi-fixture.ts';
-
-const budget = { contextLimit: 32768, marginTokens: 1024 };
 
 test('native SDK projections replace, restore, resume, and branch without changing raw evidence', async () => {
   const fixture = await createPiFixture();
@@ -61,7 +60,7 @@ test('selection stops explicitly on unsupported native edits without dispatch or
     seedHistory(manager);
     const user = manager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'user')!;
     manager.appendContextEdit(user.id, { content: 'Changed user instructions' });
-    const run = await fixture.session((manager) => [createContextExtension(manager, { policy: 'scripted-v1', budget, select: () => [] })], manager);
+    const run = await fixture.session((manager) => [createWorkingContextExtension(manager, captureOptions(fixture.model))], manager);
     await run.session.prompt('Do not mix projection owners.');
     assert.equal(fixture.requests.length, 0);
     const records = manager.getBranch().filter((entry) => entry.type === 'custom');
@@ -80,8 +79,11 @@ test('system and tool changes stay on the wire without changing evidence protect
     const observed: HistoryView[] = [];
     let prompt = 'First system instructions.';
     const run = await fixture.session((manager) => [
-      (pi) => { pi.on('before_agent_start', () => ({ systemPrompt: prompt })); },
-      createContextExtension(manager, { policy: 'scripted-v1', budget, select: (history) => { observed.push(history); return null; } }),
+      (pi) => {
+        pi.on('before_agent_start', () => ({ systemPrompt: prompt }));
+        pi.on('context', (event) => { observed.push(readHistory(manager.getBranch(), event.messages)); });
+      },
+      createWorkingContextExtension(manager, captureOptions(fixture.model)),
     ], manager, ['read', 'bash']);
     await run.session.prompt('Continue.');
     prompt = 'Second system instructions.';

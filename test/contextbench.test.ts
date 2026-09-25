@@ -5,7 +5,9 @@ import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { analyzeCaptures, captureRequest, exportDiscovery, mergeSpans, type RequestCapture, type SourceSnapshot } from '../eval/contextbench.ts';
 import { contextFixture, contextbenchDiagnostic, fixtureModel, fixtureSource } from '../eval/contextbench-fixture.ts';
-import { createContextExtension, STOP_ENTRY } from '../src/extension.ts';
+import { createWorkingContextExtension, STOP_ENTRY } from '../src/working-extension.ts';
+import { commitSelection } from '../src/history.ts';
+import { captureOptions } from './working-fixture.ts';
 import { isToolOutput, readProviderPayload } from '../src/provider-view.ts';
 import { createCodexFixture } from './codex-fixture.ts';
 import { createPiFixture } from './pi-fixture.ts';
@@ -104,16 +106,19 @@ test('capture and analysis reject false provenance instead of joining unrelated 
   }
 });
 
-test('a budget stop is not a captured request or a scored zero', async () => {
+test('a capacity stop is not a captured request or a scored zero', async () => {
   let received = 0;
   const fixture = await createPiFixture(() => { received++; });
   try {
-    const { session, manager, errors } = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'scripted-v1', budget: { contextLimit: 1, marginTokens: 0 },
-    })]);
+    const options = captureOptions(fixture.model);
+    options.capacity.contextLimit = 1024;
+    options.target = { lowTokens: 512, highTokens: 768 };
+    const { session, manager, errors } = await fixture.session((manager) => [createWorkingContextExtension(manager, options)]);
     await session.prompt('Cannot dispatch within this budget.');
     assert.equal(received, 0);
-    assert.equal(manager.getBranch().filter((entry) => entry.type === 'custom' && entry.customType === STOP_ENTRY).length, 1);
+    const stops = manager.getBranch().filter((entry) => entry.type === 'custom').filter((entry) => entry.customType === STOP_ENTRY);
+    assert.equal(stops.length, 1);
+    assert.equal((stops[0]!.data as { kind: string }).kind, 'capacity-stop');
     assert.deepEqual(errors, []);
     const report = analyzeCaptures([], fixtureSource, reference);
     assert.equal(report.status, 'no-captures');
@@ -122,7 +127,7 @@ test('a budget stop is not a captured request or a scored zero', async () => {
 });
 
 for (const createFixture of [createPiFixture, createCodexFixture]) {
-test(`${createFixture.name}: transport captures reads, retirement and restoration without another execution or gold in the prompt`, async () => {
+test(`${createFixture.name}: transport captures manual native retirement and restoration without another execution or gold in the prompt`, async () => {
   const captures: RequestCapture[] = [];
   const captureErrors: unknown[] = [];
   let manager: SessionManager;
@@ -138,10 +143,7 @@ test(`${createFixture.name}: transport captures reads, retirement and restoratio
     source = { ...fixtureSource, root, cwd: fixture.directory };
     for (const [file, text] of Object.entries(source.files)) await writeFile(join(root, file), text);
     manager = SessionManager.create(fixture.directory, join(fixture.directory, 'sessions'));
-    let selection: string[] | null = null;
-    const { session, errors } = await fixture.session((manager) => [createContextExtension(manager, {
-      policy: 'scripted-v1', budget: { contextLimit: 32768, marginTokens: 1024, outputReserveTokens: 1024 }, select: () => selection,
-    })], manager, ['read']);
+    const { session, errors } = await fixture.session(() => [], manager, ['read']);
     const executed: string[] = [];
     session.subscribe((event) => { if (event.type === 'tool_execution_start') executed.push(event.toolCallId); });
     fixture.respondWithTools([{ id: 'read_answer', name: 'read', arguments: { path: 'repo/answer.ts', offset: 1, limit: 1 } }]);
@@ -151,9 +153,11 @@ test(`${createFixture.name}: transport captures reads, retirement and restoratio
     const original = manager.getBranch().find((entry) => entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolCallId.split('|')[0] === 'read_answer');
     assert.ok(original);
     const before = structuredClone(original);
-    selection = [original.id];
+    commitSelection(manager, [original.id], 'fixture');
+    session.refreshContext();
     await session.prompt('Take a detour.');
-    selection = [];
+    commitSelection(manager, [], 'fixture');
+    session.refreshContext();
     await session.prompt('Return to the answer.');
     assert.deepEqual(captureErrors, []);
     assert.deepEqual(errors, []);

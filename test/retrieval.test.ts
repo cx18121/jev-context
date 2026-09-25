@@ -2,10 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { commitSelection, readHistory } from '../src/history.ts';
-import { exploreArchive, retrieveArchive } from '../src/retrieval.ts';
+import { exploreArchive } from '../src/retrieval.ts';
 import { appendExchange, result } from './history-fixture.ts';
-import { briefQueryText } from '../src/task-brief.ts';
-import { taskBrief } from './brief-fixture.ts';
 
 function fixture(texts: string[], query: string) {
   const manager = SessionManager.inMemory();
@@ -16,7 +14,7 @@ function fixture(texts: string[], query: string) {
   return { manager, ids, lookup(limit = 2) {
     const messages = manager.buildSessionContext().messages;
     const history = readHistory(manager.getBranch(), messages);
-    return retrieveArchive(history, query, limit);
+    return exploreArchive(history, query, limit);
   } };
 }
 
@@ -24,7 +22,7 @@ test('lookup ranks whole archived observations, including buried words, without 
   const f = fixture(['Palette colors', 'padding '.repeat(500) + 'refundPolicy requires receipt\n' + 'padding '.repeat(500), 'Refund policy explanation'], 'Implement refund_policy');
   const before = structuredClone(f.manager.getBranch());
   const lookup = f.lookup(1);
-  assert.equal(lookup.version, 'token-overlap-v1');
+  assert.equal(lookup.version, 'capture-page-overlap-v1');
   assert.equal(lookup.poolSize, 3);
   assert.equal(lookup.candidates.length, 1);
   assert.equal(lookup.candidates[0]!.evidence.id, f.ids[1]);
@@ -46,16 +44,15 @@ test('tool argument values can retrieve evidence without a body match', () => {
   const messages = f.manager.buildSessionContext().messages;
   const history = readHistory(f.manager.getBranch(), messages);
   history.evidence[0]!.call.arguments = { path: 'src/RefundPolicy.ts' };
-  const selected = retrieveArchive(history, 'refund_policy', 1);
+  const selected = exploreArchive(history, 'refund_policy', 1);
   assert.equal(selected.candidates[0]!.evidence.id, f.ids[0]);
   assert.deepEqual(selected.candidates[0]!.matchedTerms, ['policy', 'refund']);
 });
 
-test('retrieval uses the supplied current brief, not superseded user history', () => {
+test('retrieval uses the supplied sketch query, not superseded user history', () => {
   const f = fixture(['invoice requirements', 'sandbox setup'], 'Finish invoice changes');
-  const brief = taskBrief('Fix sandbox setup');
   const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
-  const lookup = retrieveArchive(history, briefQueryText(brief), 4);
+  const lookup = exploreArchive(history, 'Fix sandbox setup', 4);
   assert.ok(!lookup.queryTerms.includes('invoice'));
   assert.deepEqual(lookup.candidates.map((item) => item.evidence.id), [f.ids[1]]);
 });
@@ -79,7 +76,7 @@ test('no lexical matches produce an empty shortlist rather than arbitrary paddin
   const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
   // No latest tool target in this controlled query, avoiding its shared .txt extension.
   history.evidence.at(-1)!.call.arguments = {};
-  const lookup = retrieveArchive(history, query, 3);
+  const lookup = exploreArchive(history, query, 3);
   assert.equal(lookup.poolSize, 1);
   assert.equal(lookup.matchedCount, 0);
   assert.deepEqual(lookup.candidates, []);
@@ -142,9 +139,9 @@ test('invalid bounds and invalid archived selections fail explicitly', () => {
   const messages = f.manager.buildSessionContext().messages;
   const history = readHistory(f.manager.getBranch(), messages);
   history.retiredIds = [history.evidence.at(-1)!.id];
-  assert.throws(() => retrieveArchive(history, 'invoice', 2), /protected evidence/);
+  assert.throws(() => exploreArchive(history, 'invoice', 2), /protected evidence/);
   history.retiredIds = ['missing'];
-  assert.throws(() => retrieveArchive(history, 'invoice', 2), /Unknown evidence/);
+  assert.throws(() => exploreArchive(history, 'invoice', 2), /Unknown evidence/);
   history.retiredIds = [];
-  assert.deepEqual(retrieveArchive(history, 'invoice', 2).candidates, []);
+  assert.deepEqual(exploreArchive(history, 'invoice', 2).candidates, []);
 });

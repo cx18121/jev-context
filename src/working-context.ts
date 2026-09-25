@@ -1,19 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model, Usage } from '@earendil-works/pi-ai';
-import type { BudgetMeasurement } from './budget.ts';
 import { readProviderPayload } from './provider-view.ts';
-
-export interface WorkingMeasurement {
-  method: 'provider-usage-plus-delta-v1';
-  inputEstimate: number | null;
-  outputReserve: number;
-  marginTokens: number;
-  contextLimit: number;
-  fits: boolean | null;
-  anchorRequestId: string | null;
-  unknownReason?: 'no-anchor' | 'request-changed';
-}
 
 interface ItemShape { hash: string; textBytes?: number }
 export interface UsageAnchor {
@@ -74,7 +62,7 @@ export function createUsageAnchor(payload: unknown, model: Model<Api>, usage: Us
 }
 
 function anchoredInput(
-  payload: unknown, model: Model<Api>, anchor: UsageAnchor, additionBytesPerToken: number, removalBytesPerToken: number,
+  payload: unknown, model: Model<Api>, anchor: UsageAnchor,
 ): number | undefined {
   const { header, items } = requestParts(payload, model.api);
   if (anchor.model !== modelKey(model) || anchor.header !== header || items.length <= anchor.items.length) return;
@@ -84,7 +72,7 @@ function anchoredInput(
     if (current.hash !== previous.hash) return;
     if (previous.textBytes !== undefined) {
       const delta = current.textBytes! - previous.textBytes;
-      deltaTokens += delta / (delta >= 0 ? additionBytesPerToken : removalBytesPerToken);
+      deltaTokens += delta / (delta >= 0 ? 3 : 5);
     }
   }
   // Count the previous response once via reported output, including reasoning, never ciphertext bytes.
@@ -99,7 +87,7 @@ function anchoredInput(
     } else {
       if (!sawAssistant || (item.role !== 'user' && !toolField(item, model.api))) return;
       sawInput = true;
-      deltaTokens += bytes(item) / additionBytesPerToken;
+      deltaTokens += bytes(item) / 3;
     }
   }
   if (!sawAssistant) return;
@@ -127,7 +115,7 @@ function reasoningDetails(value: unknown): Record<string, unknown>[] {
 export function estimateContextInput(
   payload: unknown, model: Model<Api>, options: { anchor?: UsageAnchor; messages?: readonly AgentMessage[] } = {},
 ): InputEstimate {
-  const anchored = options.anchor && anchoredInput(payload, model, options.anchor, 3, 5);
+  const anchored = options.anchor && anchoredInput(payload, model, options.anchor);
   if (anchored !== undefined) return { method: 'provider-usage-plus-delta-v2', tokens: anchored,
     anchorRequestId: options.anchor!.requestId, opaqueOutputTokens: 0 };
 
@@ -178,16 +166,4 @@ export function estimateContextInput(
   const opaqueOutputTokens = [...outputs.values()].reduce((sum, output) => sum + output, 0);
   return { method: 'cold-visible-bytes-plus-output-v1', tokens: Math.ceil(bytes(visible) / 3) + opaqueOutputTokens,
     anchorRequestId: null, opaqueOutputTokens, fallbackReason: options.anchor ? 'request-changed' : 'no-anchor' };
-}
-
-/** Legacy selector measurement, removed when the working-set policy takes over. */
-export function measureWorkingContext(
-  payload: unknown, model: Model<Api>, hard: BudgetMeasurement, contextLimit: number, anchor?: UsageAnchor,
-): WorkingMeasurement {
-  const inputEstimate = anchor ? anchoredInput(payload, model, anchor, 4, 4) ?? null : null;
-  return { method: 'provider-usage-plus-delta-v1', inputEstimate, outputReserve: hard.outputReserve,
-    marginTokens: hard.marginTokens, contextLimit, anchorRequestId: anchor?.requestId ?? null,
-    fits: inputEstimate === null ? null : inputEstimate + hard.outputReserve + hard.marginTokens <= contextLimit,
-    ...(inputEstimate === null && { unknownReason: anchor ? 'request-changed' as const : 'no-anchor' as const }),
-  };
 }

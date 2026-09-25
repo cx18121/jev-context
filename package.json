@@ -8,10 +8,7 @@
     "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "eval:retrieval": "node --import tsx eval/retrieval.ts",
-    "eval:contextbench": "node --import tsx eval/contextbench-fixture.ts",
-    "pilot": "node --import tsx eval/cli.ts",
-    "pilot:live": "node --env-file=.env --import tsx eval/cli.ts --live",
-    "pilot:paired:live": "node --env-file=.env --import tsx eval/cli.ts --paired --live"
+    "eval:contextbench": "node --import tsx eval/contextbench-fixture.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.87.1",

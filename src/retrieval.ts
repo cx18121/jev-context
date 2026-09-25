@@ -1,6 +1,6 @@
 import { validateSelection, type Evidence, type HistoryView } from './history.ts';
 
-export const RETRIEVAL_VERSION = 'token-overlap-v1';
+export const EXPLORATION_VERSION = 'capture-page-overlap-v1';
 
 export interface ArchiveCursor {
   version: 1;
@@ -9,7 +9,7 @@ export interface ArchiveCursor {
 }
 
 export interface ArchiveLookup {
-  version: typeof RETRIEVAL_VERSION;
+  version: typeof EXPLORATION_VERSION;
   queryTerms: string[];
   poolSize: number;
   matchedCount: number;
@@ -49,19 +49,11 @@ function matchingArchive(history: HistoryView, query: string): ArchiveLookup {
     return { evidence: item.evidence, matchedTerms,
       score: matchedTerms.reduce((sum, term) => sum + Math.log(1 + pool.length / frequencies.get(term)!), 0) };
   }).filter((item) => item.matchedTerms.length > 0);
-  return { version: RETRIEVAL_VERSION, queryTerms, poolSize: pool.length, matchedCount: ranked.length, candidates: ranked };
+  return { version: EXPLORATION_VERSION, queryTerms, poolSize: pool.length, matchedCount: ranked.length, candidates: ranked };
 }
 
 function checkLimit(limit: number) {
   if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('maxCandidates must be a positive safe integer');
-}
-
-/** Legacy global top-K lookup, retained only until its callers migrate. */
-export function retrieveArchive(history: HistoryView, query: string, maxCandidates: number): ArchiveLookup {
-  checkLimit(maxCandidates);
-  const lookup = matchingArchive(history, query);
-  lookup.candidates.sort((a, b) => b.score - a.score);
-  return { ...lookup, candidates: lookup.candidates.slice(0, maxCandidates) };
 }
 
 /** Advance through capture-order pages of matches, then rank within the page. Query changes never reset progress. */
@@ -82,5 +74,5 @@ export function exploreArchive(history: HistoryView, query: string, maxCandidate
   const nextCursor: ArchiveCursor = { version: 1, afterId: pageIds.at(-1) ?? (resetReason ? null : cursor?.afterId ?? null) };
   // The frontier advances over the entire page, including items omitted by later planning.
   page.sort((a, b) => b.score - a.score);
-  return { ...lookup, version: 'capture-page-overlap-v1' as const, candidates: page, pageIds, nextCursor, wrapped, resetReason };
+  return { ...lookup, candidates: page, pageIds, nextCursor, wrapped, resetReason };
 }

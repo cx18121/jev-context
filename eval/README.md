@@ -13,31 +13,13 @@ npm run eval:retrieval
 npm run eval:contextbench
 ```
 
-These use authored fixtures without credentials, Docker, or paid calls. Retrieval reports shortlist coverage and known misses. The ContextBench fixture demonstrates a source read being retired and restored in the visible view. Neither command reports an official benchmark score.
+These use authored fixtures without credentials, Docker, or paid calls. Retrieval diagnostic v2 measures the first capture-order page. It distinguishes matches outside that page from observations with no lexical match. It does not measure eventual exploration recall or task-sketch quality. The ContextBench fixture demonstrates a source read being retired and restored in the visible view. Neither command reports an official benchmark score.
 
-## Historical experiments and integration controls
+## Historical experiments
 
-The commands below support the [historical experiment reports](../docs/experiments/README.md) and integration controls. Their fixed output directories are exclusive. Do not remove existing artifacts to silently rerun a paid campaign. Recorded approvals and cost estimates describe those experiments, not authorization for new spending.
+The [experiment reports](../docs/experiments/README.md) retain their original results and limitations. The synthetic pilot belongs to commit `7cbc9d6dac2793b79306a6bd8a79194bb90431a9`; the paired task-state pilot belongs to `4d09a89ea920254bf415defb744740594ac05338`. Their executable protocols remain in Git history and are no longer current npm commands.
 
-## Synthetic Jev pilot
-
-`npm run pilot` prints a dry-run manifest without loading credentials or making network requests. Six authored histories cover basic relevance, a task detour, a corrected requirement, a buried dependency, a superseded read, and instruction-like tool output. Each contains two eligible candidates and a protected latest exchange. Expected answers and their reasons are kept outside the requests. The pilot uses the existing history, candidate, state-builder, and HTTP-client code without a separate prompt.
-
-`npm run pilot:live` loads `TYPESAFE_API_KEY` from the ignored `.env` file and sends those six requests twice, sequentially. Both repeats use identical frozen bodies. This command spends money. The approved campaign is at most 12 requests to `jev-1.13.0`, with no retries, coding-model calls, or automatic expansion. Each request reserves the price of 64,000 input tokens. The full reservation is $0.032256 against a $0.05 estimated allowance at the recorded price. This is not a provider-enforced billing cap. An unexpected usage report stops further requests, but cannot undo charges already incurred.
-
-The runner creates `results/synthetic-v1/` exclusively and refuses to overwrite or resume it. The manifest, including exact synthetic requests, labels, hashes, versions, and price schedule, is written before network access. The journal records a start before each call and the result afterward, with raw usage, scores, and latency. The first service/contract failure or cancellation stops the campaign. Wrong relevance judgments do not cause tuning or retries. An unmatched start after a process crash has unknown outcome and cost. Do not delete the directory to retry an interrupted campaign without reconciling its attempted calls and obtaining approval for further spending.
-
-`report.json` separates unknown costs from the known subtotal, reports relevant-versus-irrelevant pair order, and measures repeat score differences. Strict cutoffs of 0.1, 0.2, and 0.5 are offline diagnostics only. A hypothetical harmful omission means an authored relevant candidate scores below that cutoff; an irrelevant retention is counted separately. No selected context or agent action is executed. These six development cases cannot establish a safe default threshold, calibrated probabilities, injection resistance, real task accuracy, or savings. The client config's required `retireBelow` value is unused by the direct evaluation calls.
-
-Artifacts are private, local, and Git-ignored, not an automatically backed-up research archive. Keep the exact manifest and journal with any report derived from this campaign. A later confirmation study needs a separate frozen dataset and approved protocol.
-
-### Paired task-state pilot
-
-`npm run pilot -- --paired` prints the second protocol without network access. It holds candidate evidence fixed across six before/after task pairs. Three corrections swap the required target. A historical comparison and a newly enabled consumer each make a second observation relevant without displacing the first. A temporary detour leaves both relevance labels unchanged. Similar-topic negatives replace the first pilot's repeated marketing example. Relevant candidates occupy each position equally across the ten rankable states.
-
-`npm run pilot:paired:live` loads the ignored `.env` and sends the 12 states twice to the same model and prompt. The approved campaign is at most 24 requests, no retries, with a $0.064512 input reservation against a $0.10 estimated allowance. It writes exclusively to `results/paired-v1/`, separate from the first campaign, with the same journaling and stop rules. Both-positive states have no relevant-versus-irrelevant ranking comparison and are counted as not applicable. Paired results report signed score changes; unchanged labels are controls, not a requirement for identical scores. Missing states produce unknown changes, never zeroes or successes.
-
-These are authored development fixtures, not a held-out benchmark. A correct direction alone does not establish useful separation or safe removal. No cutoff is selected and no prompt is changed by the run.
+Local artifacts under `results/` remain private and ignored. Keep the manifest and journal with any report derived from a campaign. Do not remove artifacts to rerun or resume an interrupted paid experiment. Historical approvals and cost estimates do not authorize new spending.
 
 ## Harbor integration smoke
 

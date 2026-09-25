@@ -31,7 +31,7 @@ class AdapterTests(unittest.TestCase):
             with tarfile.open(bundle) as archive:
                 names = archive.getnames()
             self.assertEqual(set(names), set(hashes))
-            self.assertIn("src/extension.ts", names)
+            self.assertIn("src/working-extension.ts", names)
             self.assertIn("eval/harbor/driver.ts", names)
             self.assertTrue(all(name in {"package.json", "package-lock.json", "eval/harbor/driver.ts", "eval/harbor/script.ts", "eval/scripted-pi.ts", "eval/contextbench.ts"} or (name.startswith("src/") and name.endswith(".ts")) for name in names))
             self.assertFalse(any(name.startswith((".env", "results/", "test/", "node_modules/")) for name in names))

@@ -5,7 +5,7 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { buildView, commitSelection, readHistory } from '../src/history.ts';
 import { providerText } from '../src/provider-view.ts';
 import { prepareWorkingSetView } from '../src/working-set-view.ts';
-import { appendExchange, result } from './history-fixture.ts';
+import { appendExchange, assistant, result } from './history-fixture.ts';
 
 const model: Model<'openai-completions'> = {
   id: 'fixture', name: 'fixture', api: 'openai-completions', provider: 'fixture', baseUrl: 'http://localhost',
@@ -124,6 +124,38 @@ test('local planning checks its cancellation/deadline guard between trial measur
   } }), /local deadline/);
   assert.equal(checks, 9);
   assert.equal(f.manager.getBranch().some((entry) => entry.type === 'context_edit'), false);
+});
+
+test('interrupted-call placeholders stay in the floor without becoming stored evidence', () => {
+  for (const api of ['openai-completions', 'openai-codex-responses'] as const) {
+    const manager = SessionManager.inMemory();
+    manager.appendMessage({ ...assistant([
+      { type: 'toolCall', id: 'done', name: 'read', arguments: {} },
+      { type: 'toolCall', id: 'pending', name: 'read', arguments: {} },
+    ]), api, provider: model.provider, model: model.id });
+    manager.appendMessage(result('done', 'Completed result'));
+    const messages = manager.buildSessionProjection().messages;
+    const history = readHistory(manager.getBranch(), messages);
+    const codex = api === 'openai-codex-responses';
+    const output = (id: string, text: string) => codex
+      ? { type: 'function_call_output', call_id: id, output: text }
+      : { role: 'tool', tool_call_id: id, content: text };
+    const items = [output('done', 'Completed result'), output('pending', 'No result provided')];
+    const payload = (entries: typeof items) => codex
+      ? { store: false, instructions: '', input: entries }
+      : { max_tokens: 100, messages: entries };
+    const prepare = (entries: typeof items) => prepareWorkingSetView(payload(entries), messages, history,
+      { ...model, api }, { ...limits, outputReserveTokens: 100 }, []);
+    const view = prepare(items);
+    assert.equal(view.candidates.length, 0);
+    assert.deepEqual(view.floor, view.before);
+    assert.deepEqual(view.select({ lowTokens: 1000, highTokens: 2000 }, 'rebalance', { kind: 'capture-order' }).payload, payload(items));
+    assert.equal(history.evidence.length, 1);
+    for (const invalid of [items.slice(0, 1), [...items, items[1]!], [items[0]!, output('pending', 'changed')]]) {
+      assert.throws(() => prepare(invalid), /Invalid provider placeholder/);
+    }
+    assert.throws(() => prepare([...items, output('foreign', 'No result provided')]), /unaccounted/);
+  }
 });
 
 test('foreign, changed, duplicate outputs and invalid shortlists fail rather than becoming invisible capacity', () => {

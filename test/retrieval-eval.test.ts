@@ -5,19 +5,21 @@ import { retrievalScenarios } from '../eval/retrieval-fixtures.ts';
 
 function scenario(id: string) { return retrievalScenarios().find((item) => item.id === id)!; }
 
-test('diagnostics preserve deliberate lexical and shortlist failures rather than counting them as success', () => {
+test('diagnostics distinguish lexical misses from matches outside the first page', () => {
   const report = retrievalReport();
+  assert.equal(report.version, 'retrieval-diagnostic-v2');
+  assert.equal(report.lookupVersion, 'capture-page-overlap-v1');
   assert.equal(report.cases.length, 11);
   const byId = new Map(report.cases.map((item) => [item.id, item]));
   for (const id of ['return-to-old-task', 'unfinished-task-during-detour', 'metadata-only', 'buried-rule',
     'archive-size-8', 'archive-size-64', 'archive-size-256']) assert.equal(byId.get(id)!.recall, 1, id);
   assert.deepEqual(byId.get('semantic-gap')!.missed, [{ id: 'rule', cause: 'no-lexical-match' }]);
-  assert.deepEqual(byId.get('correction-crowding')!.missed, [{ id: 'current', cause: 'shortlist-cutoff' }]);
+  assert.deepEqual(byId.get('correction-crowding')!.missed, [{ id: 'current', cause: 'outside-page' }]);
   assert.deepEqual(byId.get('correction-crowding')!.irrelevantSelected, ['obsolete']);
-  assert.deepEqual(byId.get('shared-path-noise')!.missed, [{ id: 'rule', cause: 'shortlist-cutoff' }]);
+  assert.deepEqual(byId.get('shared-path-noise')!.missed, [{ id: 'rule', cause: 'outside-page' }]);
   assert.deepEqual(byId.get('shared-path-noise')!.irrelevantSelected, ['palette']);
   assert.equal(byId.get('shortlist-crowding')!.recall, 0.5);
-  assert.deepEqual(byId.get('shortlist-crowding')!.missed, [{ id: 'tests', cause: 'shortlist-cutoff' }]);
+  assert.deepEqual(byId.get('shortlist-crowding')!.missed, [{ id: 'tests', cause: 'outside-page' }]);
   for (const item of report.cases) {
     assert.ok(item.candidates.length <= item.limit);
     assert.equal(item.found.length + item.missed.length, item.fullArchiveRelevant.length);

@@ -2,7 +2,6 @@ import type { Priority } from './working-set.ts';
 
 export const JEV_MODEL = 'jev-1.13.0';
 export const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
-export const JEV_PROMPT_VERSION = 'unfinished-task-v3';
 export const JEV_PRICE = {
   inputUsdPerMillion: 0.042, outputUsdPerMillion: 0,
   source: 'https://docs.typesafe.ai/models', checkedOn: '2026-09-21',
@@ -14,23 +13,13 @@ export interface JevConnection {
   endpoint?: string;
 }
 
-export interface JevConfig extends JevConnection {
-  retireBelow: number;
-}
-
-export interface JevQuestion {
-  type: 'noul';
-  instructions: { question: string; candidate: unknown };
-  criteria: { true: string; false: string };
-}
-
 export interface JevScoreQuestion {
   type: 'score';
   instructions: { question: string; candidate: unknown };
   criteria: readonly [string, string, string, string, string];
 }
 
-export interface JevRequest<Q = JevQuestion> {
+export interface JevRequest<Q = JevScoreQuestion> {
   model: typeof JEV_MODEL;
   state: unknown;
   questions: Record<string, Q>;
@@ -46,21 +35,8 @@ interface JevResponseMetadata {
   pricedCostUsd: number | null;
 }
 
-export interface JevResult extends JevResponseMetadata {
-  relevance: Record<string, number> | null;
-}
-
 export interface JevRankingResult extends JevResponseMetadata {
   priorities: Record<string, Priority> | null;
-}
-
-export class JevError extends Error {}
-
-export function validateJevConfig(config: JevConfig): void {
-  validateJevConnection(config);
-  if (!Number.isFinite(config.retireBelow) || config.retireBelow <= 0 || config.retireBelow > 1) {
-    throw new Error('Jev retireBelow must be greater than 0 and at most 1');
-  }
 }
 
 export function validateJevConnection(config: JevConnection): void {
@@ -83,14 +59,6 @@ function object(value: unknown): Record<string, unknown> | null {
 
 function tokens(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-export async function evaluateJev(request: JevRequest, config: JevConfig, signal: AbortSignal): Promise<JevResult> {
-  const { values, ...metadata } = await evaluate(request, config, signal, (answer) => {
-    return answer.type === 'noul' && typeof answer.noul === 'number' && Number.isFinite(answer.noul) &&
-      answer.noul >= 0 && answer.noul <= 1 ? answer.noul : null;
-  });
-  return { ...metadata, relevance: values };
 }
 
 /** Five ordinal levels. Use the lower median, with the expected value only as a within-level tie break. */
@@ -119,7 +87,7 @@ export async function rankJev(
   return { ...metadata, priorities: values };
 }
 
-/** One HTTP call shared by both primitives. No retry, substitute judge, or raw provider error text. */
+/** One HTTP call. No retry, substitute judge, or raw provider error text. */
 async function evaluate<Q, T>(
   request: JevRequest<Q>, config: JevConnection, signal: AbortSignal,
   parse: (answer: Record<string, unknown>, question: Q) => T | null,
