@@ -9,8 +9,9 @@ import { packWorkingSet, type Priority, type WorkingSetItem, type WorkingSetTarg
 /** Bind the packer's item IDs to exact provider outputs; all other request fields are immutable. */
 export function prepareWorkingSetView(
   payload: unknown, messages: AgentMessage[], history: HistoryView, model: Model<Api>, limits: CapacityLimits,
-  archiveIds: readonly string[], anchor?: UsageAnchor,
+  archiveIds: readonly string[], anchor?: UsageAnchor, checkWork: () => void = () => {},
 ) {
+  checkWork();
   const retired = new Set(validateSelection(history, history.retiredIds));
   if (new Set(archiveIds).size !== archiveIds.length || archiveIds.some((id) => !retired.has(id))) {
     throw new Error('Invalid working-set archive shortlist');
@@ -33,17 +34,33 @@ export function prepareWorkingSetView(
   });
   const ids = new Set(candidates.map((item) => item.id));
   const render = (visibleIds: readonly string[]) => {
+    checkWork();
     if (new Set(visibleIds).size !== visibleIds.length || visibleIds.some((id) => !ids.has(id))) throw new Error('Invalid working-set view IDs');
     const visible = new Set(visibleIds), proposal = structuredClone(source);
     for (const item of candidates) replaceProviderText(proposal, model.api, item.messageIndex, visible.has(item.id) ? item.text : item.stub);
     return proposal;
   };
-  const measure = (visibleIds: readonly string[]) => measureCapacity(render(visibleIds), model, limits, { anchor, messages });
+  const measure = (visibleIds: readonly string[]) => {
+    const value = measureCapacity(render(visibleIds), model, limits, { anchor, messages });
+    checkWork();
+    return value;
+  };
   const items: WorkingSetItem[] = candidates.map(({ id, resident, capturedAt }) => ({ id, resident, capturedAt }));
+  const residentIds = items.filter((item) => item.resident).map((item) => item.id);
+  const before = measure(residentIds), floor = measure([]);
   return {
-    candidates, before: measure(items.filter((item) => item.resident).map((item) => item.id)), floor: measure([]),
+    candidates, before, floor,
+    restorableIds(target: WorkingSetTarget) {
+      const ceiling = Math.max(target.lowTokens, floor.totalTokens);
+      if (!before.admitted || before.totalTokens >= ceiling) return [];
+      return items.filter((item) => !item.resident && (() => {
+        const trial = measure([...residentIds, item.id]);
+        return trial.admitted && trial.totalTokens <= ceiling;
+      })()).map((item) => item.id);
+    },
     select(target: WorkingSetTarget, mode: 'rebalance' | 'restore-only', scores: Readonly<Record<string, Priority>>) {
       const selection = packWorkingSet(items, target, mode, scores, measure);
+      checkWork();
       if (selection.outcome !== 'selected') return { payload: structuredClone(source), retiredIds: [...retired], selection };
       const visible = new Set(selection.visibleIds), proposedRetired = new Set(retired);
       for (const item of items) {

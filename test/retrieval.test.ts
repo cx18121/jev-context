@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { commitSelection, readHistory } from '../src/history.ts';
-import { retrieveArchive } from '../src/retrieval.ts';
+import { exploreArchive, retrieveArchive } from '../src/retrieval.ts';
 import { appendExchange, result } from './history-fixture.ts';
 import { briefQueryText } from '../src/task-brief.ts';
 import { taskBrief } from './brief-fixture.ts';
@@ -83,6 +83,57 @@ test('no lexical matches produce an empty shortlist rather than arbitrary paddin
   assert.equal(lookup.poolSize, 1);
   assert.equal(lookup.matchedCount, 0);
   assert.deepEqual(lookup.candidates, []);
+});
+
+test('bounded exploration pages through matches across query changes and wraps on the next decision', () => {
+  const f = fixture(['invoice policy', 'invoice policy', 'invoice', 'unrelated', 'invoice'], 'invoice policy');
+  const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
+  const first = exploreArchive(history, 'invoice policy', 2);
+  const second = exploreArchive(history, 'INVOICE new correction', 2, first.nextCursor);
+  const wrapped = exploreArchive(history, 'invoice policy', 2, second.nextCursor);
+  assert.deepEqual([...first.candidates, ...second.candidates].map((item) => item.evidence.id),
+    [f.ids[0], f.ids[1], f.ids[2], f.ids[4]]);
+  assert.equal(wrapped.wrapped, true);
+  assert.deepEqual(wrapped.candidates, first.candidates);
+  assert.deepEqual(wrapped.pageIds, first.pageIds);
+  assert.deepEqual(exploreArchive(history, 'unrelated', 2, second.nextCursor).pageIds, [f.ids[3]]);
+});
+
+test('restoring the frontier preserves progress and a missing off-branch frontier resets with a recorded reason', () => {
+  const f = fixture(['invoice first', 'invoice second', 'invoice third'], 'invoice');
+  const history = () => readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
+  const first = exploreArchive(history(), 'invoice', 2);
+  commitSelection(f.manager, [f.ids[0]!, f.ids[2]!], 'scripted-v1');
+  const changed = exploreArchive(history(), 'invoice', 2, first.nextCursor);
+  assert.equal(changed.resetReason, null);
+  assert.deepEqual(changed.pageIds, [f.ids[2]]);
+  const reset = exploreArchive(history(), 'invoice', 2, { version: 1, afterId: 'off-branch' });
+  assert.equal(reset.resetReason, 'missing-frontier');
+  assert.deepEqual(reset.pageIds, [f.ids[0], f.ids[2]]);
+  assert.throws(() => exploreArchive(history(), 'invoice', 2, { version: 1, afterId: '' }), /Invalid archive/);
+});
+
+test('lexical order is local to a page and the frontier is capture order, not rank order', () => {
+  const f = fixture(['invoice', 'invoice policy', 'invoice policy final'], 'invoice policy');
+  const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
+  const first = exploreArchive(history, 'invoice policy', 2);
+  assert.deepEqual(first.pageIds, f.ids.slice(0, 2));
+  assert.deepEqual(first.candidates.map((item) => item.evidence.id), [f.ids[1], f.ids[0]]);
+  assert.equal(first.nextCursor.afterId, f.ids[1]);
+  assert.deepEqual(exploreArchive(history, 'invoice policy', 2, first.nextCursor).pageIds, [f.ids[2]]);
+});
+
+test('empty exploration preserves a valid frontier without reporting a wrap', () => {
+  const f = fixture(['invoice', 'invoice'], 'invoice');
+  const history = readHistory(f.manager.getBranch(), f.manager.buildSessionContext().messages);
+  const cursor = { version: 1 as const, afterId: f.ids[0]! };
+  const empty = exploreArchive(history, 'unmatched', 2, cursor);
+  assert.equal(empty.wrapped, false);
+  assert.deepEqual(empty.nextCursor, cursor);
+  assert.equal(exploreArchive(history, 'unmatched', 2).nextCursor.afterId, null);
+  const missing = exploreArchive(history, 'unmatched', 2, { version: 1, afterId: 'missing' });
+  assert.equal(missing.nextCursor.afterId, null);
+  assert.equal(missing.resetReason, 'missing-frontier');
 });
 
 test('invalid bounds and invalid archived selections fail explicitly', () => {

@@ -89,6 +89,28 @@ test('a pinned floor stop returns the original request and cannot install partia
   assert.deepEqual(result.retiredIds, []);
 });
 
+test('restore-only preflight rejects whole archives that cannot fit without evicting residents', () => {
+  const f = fixture();
+  commitSelection(f.manager, [f.b], 'working-set-v1');
+  const { plan } = f.prepare([f.b]);
+  const lowTokens = plan.before.totalTokens + 1;
+  assert.deepEqual(plan.restorableIds({ lowTokens, highTokens: lowTokens + 100 }), []);
+  assert.deepEqual(plan.restorableIds({ lowTokens: 8000, highTokens: 9000 }), [f.b]);
+});
+
+test('local planning checks its cancellation/deadline guard between trial measurements', () => {
+  const f = fixture(), { payload, messages, history } = f.prepare();
+  let checks = 0;
+  const plan = prepareWorkingSetView(payload, messages, history, model, limits, [], undefined, () => {
+    if (++checks === 9) throw new Error('local deadline');
+  });
+  assert.throws(() => plan.select({ lowTokens: 1500, highTokens: 2000 }, 'rebalance', {
+    [f.a]: { level: 2, score: 2 }, [f.b]: { level: 1, score: 1 },
+  }), /local deadline/);
+  assert.equal(checks, 9);
+  assert.equal(f.manager.getBranch().some((entry) => entry.type === 'context_edit'), false);
+});
+
 test('foreign, changed, duplicate outputs and invalid shortlists fail rather than becoming invisible capacity', () => {
   const f = fixture(), { payload, messages, history } = f.prepare();
   for (const id of [f.latest, 'foreign']) {

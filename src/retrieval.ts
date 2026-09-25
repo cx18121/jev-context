@@ -2,6 +2,12 @@ import { validateSelection, type Evidence, type HistoryView } from './history.ts
 
 export const RETRIEVAL_VERSION = 'token-overlap-v1';
 
+export interface ArchiveCursor {
+  version: 1;
+  /** Capture frontier, including evidence that has since been restored. */
+  afterId: string | null;
+}
+
 export interface ArchiveLookup {
   version: typeof RETRIEVAL_VERSION;
   queryTerms: string[];
@@ -24,8 +30,7 @@ function argumentText(value: unknown): string {
 }
 
 /** Shortlist archived evidence only. This neither judges relevance nor changes the working view. */
-export function retrieveArchive(history: HistoryView, query: string, maxCandidates: number): ArchiveLookup {
-  if (!Number.isSafeInteger(maxCandidates) || maxCandidates < 1) throw new Error('maxCandidates must be a positive safe integer');
+function matchingArchive(history: HistoryView, query: string): ArchiveLookup {
   const retired = new Set(validateSelection(history, history.retiredIds));
   const queryTerms = [...terms(query)].sort();
   const pool = history.evidence.filter((item) => retired.has(item.id)).map((evidence) => ({
@@ -44,8 +49,38 @@ export function retrieveArchive(history: HistoryView, query: string, maxCandidat
     return { evidence: item.evidence, matchedTerms,
       score: matchedTerms.reduce((sum, term) => sum + Math.log(1 + pool.length / frequencies.get(term)!), 0) };
   }).filter((item) => item.matchedTerms.length > 0);
-  // Stable sorting preserves capture order on ties, not randomly generated session-entry IDs.
-  ranked.sort((a, b) => b.score - a.score);
-  return { version: RETRIEVAL_VERSION, queryTerms, poolSize: pool.length,
-    matchedCount: ranked.length, candidates: ranked.slice(0, maxCandidates) };
+  return { version: RETRIEVAL_VERSION, queryTerms, poolSize: pool.length, matchedCount: ranked.length, candidates: ranked };
+}
+
+function checkLimit(limit: number) {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('maxCandidates must be a positive safe integer');
+}
+
+/** Legacy global top-K lookup, retained only until its callers migrate. */
+export function retrieveArchive(history: HistoryView, query: string, maxCandidates: number): ArchiveLookup {
+  checkLimit(maxCandidates);
+  const lookup = matchingArchive(history, query);
+  lookup.candidates.sort((a, b) => b.score - a.score);
+  return { ...lookup, candidates: lookup.candidates.slice(0, maxCandidates) };
+}
+
+/** Advance through capture-order pages of matches, then rank within the page. Query changes never reset progress. */
+export function exploreArchive(history: HistoryView, query: string, maxCandidates: number, cursor?: ArchiveCursor) {
+  checkLimit(maxCandidates);
+  if (cursor && (cursor.version !== 1 || (cursor.afterId !== null &&
+      (typeof cursor.afterId !== 'string' || cursor.afterId.length === 0)))) throw new Error('Invalid archive exploration cursor');
+  const lookup = matchingArchive(history, query);
+  const positions = new Map(history.evidence.map((item, index) => [item.id, index]));
+  const resetReason = cursor?.afterId && !positions.has(cursor.afterId) ? 'missing-frontier' as const : null;
+  const after = cursor?.afterId && !resetReason ? positions.get(cursor.afterId)! : -1;
+  let remaining = lookup.candidates.filter((item) => positions.get(item.evidence.id)! > after);
+  const wrapped = lookup.candidates.length > 0 && remaining.length === 0 && after >= 0;
+  if (wrapped) remaining = lookup.candidates;
+  // A short final page does not fill from the beginning. The next decision wraps.
+  const page = remaining.slice(0, maxCandidates);
+  const pageIds = page.map((item) => item.evidence.id);
+  const nextCursor: ArchiveCursor = { version: 1, afterId: pageIds.at(-1) ?? (resetReason ? null : cursor?.afterId ?? null) };
+  // The frontier advances over the entire page, including items omitted by later planning.
+  page.sort((a, b) => b.score - a.score);
+  return { ...lookup, version: 'capture-page-overlap-v1' as const, candidates: page, pageIds, nextCursor, wrapped, resetReason };
 }
