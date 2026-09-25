@@ -16,8 +16,9 @@ function fixture(spec: Array<[string, boolean, number, number, number?]>, floorT
       totalTokens, outputReserve: 8, outputReserveSource: 'configured-headroom', marginTokens: 2, contextLimit: 200,
       wireBytes, maxRequestBytes: wireLimit, tokenFits, wireFits, admitted: tokenFits && wireFits };
   };
-  const pack = (mode: 'rebalance' | 'restore-only' = 'rebalance') => packWorkingSet(items, target, mode, scores, measure);
-  return { items, scores, measure, pack };
+  const pack = (mode: 'rebalance' | 'restore-only' = 'rebalance') => packWorkingSet(items, target, mode, { kind: 'jev', priorities: scores }, measure);
+  const capture = (mode: 'rebalance' | 'restore-only' = 'rebalance') => packWorkingSet(items, target, mode, { kind: 'capture-order' }, measure);
+  return { items, scores, measure, pack, capture };
 }
 
 test('all-useful evidence is ranked into capacity instead of requiring an irrelevant tail', () => {
@@ -44,7 +45,7 @@ test('priority ties favor incumbents, then newer capture, then stable ID', () =>
   f.items[0]!.capturedAt = f.items[1]!.capturedAt;
   const expected = f.pack().visibleIds;
   assert.deepEqual(expected, ['new', 'old']); // lexical ID tie, independent of input order
-  assert.deepEqual(packWorkingSet([...f.items].reverse(), target, 'rebalance', f.scores, f.measure).visibleIds, expected);
+  assert.deepEqual(packWorkingSet([...f.items].reverse(), target, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure).visibleIds, expected);
 });
 
 test('a restore must beat every victim by a median level, not a fraction of expected score', () => {
@@ -133,11 +134,60 @@ test('incomplete, foreign, duplicate and invalid rankings fail rather than treat
   const invalid: Record<string, Priority>[] = [{ a: f.scores.a! }, { ...f.scores, c: f.scores.a! },
     { ...f.scores, a: { level: 1.5, score: 2 } }, { ...f.scores, a: { level: 4, score: NaN } }];
   for (const scores of invalid) {
-    assert.throws(() => packWorkingSet(f.items, target, 'rebalance', scores, f.measure), /Invalid or incomplete/);
+    assert.throws(() => packWorkingSet(f.items, target, 'rebalance', { kind: 'jev', priorities: scores }, f.measure), /Invalid or incomplete/);
   }
-  assert.throws(() => packWorkingSet([...f.items, f.items[0]!], target, 'rebalance', f.scores, f.measure), /Invalid or incomplete/);
+  assert.throws(() => packWorkingSet([...f.items, f.items[0]!], target, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure), /Invalid or incomplete/);
   for (const bad of [{ highTokens: 100, lowTokens: 100 }, { highTokens: 201, lowTokens: 80 }, { highTokens: 100, lowTokens: 0 }]) {
-    assert.throws(() => packWorkingSet(f.items, bad, 'rebalance', f.scores, f.measure), /Working-set targets/);
+    assert.throws(() => packWorkingSet(f.items, bad, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure), /Working-set targets/);
+  }
+});
+
+test('capture order keeps newer residents and permits only strictly newer archive swaps', () => {
+  const f = fixture([['old', true, 60, 4], ['new', false, 50, 0]]);
+  assert.deepEqual(f.capture().visibleIds, ['new']);
+  assert.deepEqual(f.pack().visibleIds, ['old'], 'Jev still uses its own level rule');
+  for (const key of Object.keys(f.scores)) delete f.scores[key];
+  assert.deepEqual(f.capture().visibleIds, ['new'], 'capture order has no score dependency');
+  const older = fixture([['archive', false, 50, 4], ['resident', true, 60, 0]]).capture();
+  assert.deepEqual(older.visibleIds, ['resident']);
+  assert.equal(older.skipped[0]!.reason, 'swap-margin');
+  assert.deepEqual(fixture([['old', true, 40, 4], ['new', true, 40, 0]]).capture().visibleIds, ['new']);
+});
+
+test('capture-order swaps refill residents before an older archive can use the freed room', () => {
+  const f = fixture([['B', false, 20, 4], ['Y', true, 10, 0], ['X', true, 50, 0], ['A', false, 40, 0]]);
+  assert.deepEqual(f.capture().visibleIds, ['A', 'Y']);
+  assert.deepEqual(f.capture().displacedIds, ['X']);
+  const skipped = fixture([['B', false, 30, 4], ['Z', true, 25, 0], ['X', true, 50, 0], ['A', false, 30, 0]]);
+  assert.deepEqual(skipped.capture().visibleIds, ['A', 'Z']);
+});
+
+test('capture order rejects ambiguous chronology without changing Jev tie handling', () => {
+  const f = fixture([['a', true, 20, 3], ['b', false, 20, 4]]);
+  f.items[1]!.capturedAt = f.items[0]!.capturedAt;
+  assert.throws(() => f.capture(), /unique chronological positions/);
+  assert.equal(f.pack().outcome, 'selected');
+});
+
+test('capture-order enumeration preserves capacity, recency margins and restore-only residents', () => {
+  for (let archivePosition = 0; archivePosition < 3; archivePosition++) {
+    for (const a of [10, 30, 60, 100]) for (const b of [10, 30, 60, 100]) for (const c of [10, 30, 60, 100]) {
+      const f = fixture([a, b, c].map((size, index) => [String(index), index !== archivePosition, size, 0]));
+      const result = f.capture();
+      assert.equal(result.after.admitted, true);
+      assert.ok(result.after.totalTokens <= target.lowTokens);
+      assert.deepEqual(result.after, f.measure(result.visibleIds));
+      assert.deepEqual(packWorkingSet([...f.items].reverse(), target, 'rebalance', { kind: 'capture-order' }, f.measure), result);
+      const initial = packWorkingSet(f.items.filter((item) => item.resident), target, 'rebalance', { kind: 'capture-order' }, f.measure);
+      if (result.restoredIds.length) {
+        for (const id of initial.visibleIds.filter((id) => !result.visibleIds.includes(id))) {
+          assert.ok(archivePosition > Number(id), 'the archive must be newer than every swap victim');
+        }
+      }
+      const restore = f.capture('restore-only');
+      assert.deepEqual(restore.displacedIds, []);
+      if (restore.restoredIds.length) assert.ok(restore.after.totalTokens <= target.lowTokens);
+    }
   }
 });
 

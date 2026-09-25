@@ -17,6 +17,10 @@ export interface WorkingSetItem {
   resident: boolean;
 }
 
+export type WorkingSetOrder =
+  | { kind: 'jev'; priorities: Readonly<Record<string, Priority>> }
+  | { kind: 'capture-order' };
+
 type RankedItem = WorkingSetItem & { priority?: Priority };
 
 export interface WorkingSetSelection {
@@ -53,23 +57,35 @@ export function underPressure(measured: CapacityMeasurement, target: WorkingSetT
 /**
  * One complete replacement, never a stream of edits. `measure` renders the listed items whole and
  * every other eligible item as its stub; pins are outside this list and always remain in the view.
- * It must use the same request, usage anchor and limits for every call. Scores must come from one
+ * It must use the same request, usage anchor and limits for every call. Jev scores come from one
  * decision. Rebalancing requires every score; restore-only needs no scores for unchanged residents.
+ * Capture order requires unique chronological positions and uses no scores.
  */
 export function packWorkingSet(
   items: readonly WorkingSetItem[], target: WorkingSetTarget,
-  mode: 'rebalance' | 'restore-only', scores: Readonly<Record<string, Priority>>,
+  mode: 'rebalance' | 'restore-only', order: WorkingSetOrder,
   measure: (visibleIds: readonly string[]) => CapacityMeasurement,
 ): WorkingSetSelection {
   const byId = new Map(items.map((item) => [item.id, item]));
-  if (byId.size !== items.length || items.some((item) => !item.id || !Number.isSafeInteger(item.capturedAt) || item.capturedAt < 0) ||
-      Object.entries(scores).some(([id, priority]) => !byId.has(id) ||
-        !Number.isInteger(priority.level) || priority.level < 0 || priority.level > 4 ||
-        !Number.isFinite(priority.score) || priority.score < 0 || priority.score > 4) ||
-      items.some((item) => (mode === 'rebalance' || !item.resident) && !Object.hasOwn(scores, item.id))) {
+  if (byId.size !== items.length || items.some((item) => !item.id || !Number.isSafeInteger(item.capturedAt) || item.capturedAt < 0)) {
     throw new Error('Invalid or incomplete working-set ranking');
   }
-  const ordered: RankedItem[] = items.map((item) => ({ ...item, priority: scores[item.id] })).sort(compare);
+  let ordered: RankedItem[];
+  if (order.kind === 'jev') {
+    const scores = order.priorities;
+    if (Object.entries(scores).some(([id, priority]) => !byId.has(id) || !priority ||
+        !Number.isInteger(priority.level) || priority.level < 0 || priority.level > 4 ||
+        !Number.isFinite(priority.score) || priority.score < 0 || priority.score > 4) ||
+        items.some((item) => (mode === 'rebalance' || !item.resident) && !Object.hasOwn(scores, item.id))) {
+      throw new Error('Invalid or incomplete working-set ranking');
+    }
+    ordered = items.map((item) => ({ ...item, priority: Object.hasOwn(scores, item.id) ? scores[item.id] : undefined })).sort(compare);
+  } else {
+    if (new Set(items.map((item) => item.capturedAt)).size !== items.length) {
+      throw new Error('Capture order requires unique chronological positions');
+    }
+    ordered = [...items].sort((a, b) => b.capturedAt - a.capturedAt);
+  }
   const residents = ordered.filter((item) => item.resident);
   const before = measure(residents.map((item) => item.id));
   const floor = measure([]);
@@ -102,14 +118,16 @@ export function packWorkingSet(
     return true;
   };
 
-  // Establish the best fitting resident set first. Archive entries must earn any displacement
-  // by a full median level, rather than by a tiny change in an uncalibrated expected score.
+  // Establish the best fitting resident set first. Archives must earn every displacement:
+  // a full median level for Jev, or a strictly newer capture for the control.
   if (mode === 'rebalance') for (const item of residents) addIfFits(item);
   for (const item of ordered.filter((candidate) => !candidate.resident)) {
     if (addIfFits(item)) continue;
     if (!fits(measure([item.id]))) { reasons.set(item.id, 'whole-item-exceeds-target'); continue; }
     if (mode === 'restore-only') { reasons.set(item.id, 'lower-priority-under-capacity'); continue; }
-    const victims = residents.filter((resident) => selected.has(resident.id) && resident.priority!.level < item.priority!.level).reverse();
+    const victims = residents.filter((resident) => selected.has(resident.id) && (order.kind === 'jev'
+      ? resident.priority!.level < item.priority!.level
+      : resident.capturedAt < item.capturedAt)).reverse();
     const next = new Set(selected).add(item.id);
     let accepted = false;
     for (const victim of victims) {
@@ -123,7 +141,7 @@ export function packWorkingSet(
     }
     if (accepted) {
       // Removing a large victim may make earlier removals unnecessary. Refill before another
-      // archive can take that room without earning its own strictly-higher-level swap.
+      // archive can take that room without earning its own swap.
       for (const resident of residents) if (!selected.has(resident.id)) addIfFits(resident);
     } else reasons.set(item.id, 'swap-margin');
   }

@@ -30,7 +30,7 @@ async function fixture() {
   const options: WorkingContextOptions = {
     capacity: { contextLimit: 30000, marginTokens: 100, maxRequestBytes: 300000 },
     target: { lowTokens: 7000, highTokens: 9000 }, archiveLimit: 2, decisionTimeoutMs: 30000,
-    jev: judge.config,
+    order: { kind: 'jev', connection: judge.config },
     ranking: { maxPairBytes: 16000, maxRequestBytes: 40000, maxRequests: 8, maxSegments: 100,
       maxInputBytes: 500000, maxCostUsd: 1, requestTimeoutMs: judge.config.timeoutMs, maxDurationMs: 20000 },
     sketch: { model: pi.model, timeoutMs: 2000, maxTokens: 1000, maxUpdates: 4,
@@ -90,6 +90,86 @@ test('pressure ranks all eligible residents and commits whole edits to the actua
     assert.deepEqual(run.errors, []);
   } finally { await f.close(); }
 });
+
+test('capture-order and Jev share the SDK candidate pool and limits but choose different residents', async () => {
+  const decisions: Array<{ candidateCount: number; targetTokens: number; floorTokens: number; reservation: number }> = [];
+  for (const kind of ['jev', 'capture-order'] as const) {
+    const f = await fixture();
+    try {
+      if (kind === 'capture-order') f.options.order = { kind };
+      const manager = SessionManager.inMemory(f.pi.directory);
+      const { old, other } = seed(manager, false, 14000);
+      f.judge.respond((request) => ({ body: scoreResponse(request, (id) => id === old ? 4 : 1) }));
+      const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
+      await run.session.prompt('Finish invoice API contract.');
+      assert.equal(f.pi.requests.length, 1);
+      assert.equal(f.sketches(), 1, 'both orders maintain the same advisory sketch');
+      assert.equal(f.judge.requests.length > 0, kind === 'jev');
+      assert.deepEqual(history(manager).retiredIds, [kind === 'jev' ? other : old]);
+      assert.match(JSON.stringify(f.pi.requests[0]), /NEWEST OBSERVATION/);
+      const checkpoint = entries(manager, SELECTION_ENTRY).at(-1)!.data as { reconsideration: {
+        order: string; ranking: { candidateIds: string[]; inputByteReservation: number };
+        selection: { targetTokens: number; floor: { totalTokens: number } };
+      } };
+      const decision = checkpoint.reconsideration;
+      assert.equal(decision.order, kind);
+      assert.deepEqual(new Set(decision.ranking.candidateIds), new Set([old, other]));
+      decisions.push({ candidateCount: decision.ranking.candidateIds.length, targetTokens: decision.selection.targetTokens,
+        floorTokens: decision.selection.floor.totalTokens, reservation: decision.ranking.inputByteReservation });
+      assert.deepEqual(run.errors, []);
+    } finally { await f.close(); }
+  }
+  assert.deepEqual(decisions[0], decisions[1]);
+});
+
+test('capture-order SDK swaps restore newer archives but leave older archives retired', async () => {
+  for (const archiveNewer of [false, true]) {
+    const f = await fixture();
+    try {
+      f.options.order = { kind: 'capture-order' };
+      const manager = SessionManager.inMemory(f.pi.directory);
+      const { old, other } = seed(manager, false, 14000);
+      commitSelection(manager, [archiveNewer ? other : old], 'scripted-v1');
+      const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
+      await run.session.prompt('Finish invoice API contract.');
+      assert.equal(f.pi.requests.length, 1);
+      assert.equal(f.sketches(), 1);
+      assert.equal(f.judge.requests.length, 0);
+      assert.deepEqual(history(manager).retiredIds, [old]);
+      const wire = f.pi.requests[0]!.messages;
+      assert.match(String(wire.find((item) => item.tool_call_id === 'old')!.content), /retired observation/);
+      if (archiveNewer) assert.match(String(wire.find((item) => item.tool_call_id === 'other')!.content), /restored historical observation/);
+      assert.match(JSON.stringify(wire), /NEWEST OBSERVATION/);
+      assert.deepEqual(run.errors, []);
+    } finally { await f.close(); }
+  }
+});
+
+for (const failure of ['ranking-limit', 'unknown-sketch-cost'] as const) {
+  test(`capture-order retains the shared ${failure} gate without a Jev connection`, async () => {
+    const f = await fixture();
+    try {
+      f.options.order = { kind: 'capture-order' };
+      const manager = SessionManager.inMemory(f.pi.directory);
+      seed(manager, false, 14000);
+      if (failure === 'ranking-limit') f.options.ranking.maxSegments = 1;
+      else f.options.sketch.complete = async () => assistant();
+      const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
+      await run.session.prompt('Finish invoice API contract.');
+      assert.equal(f.judge.requests.length, 0);
+      assert.equal(entries(manager, SELECTION_ENTRY).length, 0);
+      assert.deepEqual(history(manager).retiredIds, []);
+      if (failure === 'ranking-limit') {
+        assert.equal(f.pi.requests.length, 1);
+        assert.match(JSON.stringify(entries(manager, 'jev-context/deferral')), /Mandatory ranking exceeds/);
+      } else {
+        assert.equal(f.pi.requests.length, 0);
+        assert.match(JSON.stringify(entries(manager, 'jev-context/stop')), /unknown cost/);
+      }
+      assert.deepEqual(run.errors, []);
+    } finally { await f.close(); }
+  });
+}
 
 test('a correction restores archived evidence in place and persists exploration across reopen', async () => {
   const f = await fixture();

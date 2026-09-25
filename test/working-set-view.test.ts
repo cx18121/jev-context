@@ -44,7 +44,7 @@ test('the complete replacement edits only selected tool bodies and round-trips t
   assert.deepEqual(first.plan.candidates.map((item) => item.id), [f.a, f.b]);
   const lowTokens = first.plan.floor.totalTokens + 1100;
   const target = { lowTokens, highTokens: lowTokens + 500 };
-  const selected = first.plan.select(target, 'rebalance', { [f.a]: { level: 4, score: 4 }, [f.b]: { level: 1, score: 1 } });
+  const selected = first.plan.select(target, 'rebalance', { kind: 'jev', priorities: { [f.a]: { level: 4, score: 4 }, [f.b]: { level: 1, score: 1 } } });
   assert.equal(selected.selection.outcome, 'selected');
   assert.deepEqual(selected.retiredIds, [f.b]);
   assert.equal(selected.selection.after.admitted, true);
@@ -61,7 +61,7 @@ test('the complete replacement edits only selected tool bodies and round-trips t
   assert.deepEqual(f.manager.getBranch().filter((entry) => entry.type === 'message'), branch.filter((entry) => entry.type === 'message'));
 
   const next = f.prepare([f.b]);
-  const restored = next.plan.select(target, 'rebalance', { [f.a]: { level: 1, score: 1 }, [f.b]: { level: 4, score: 4 } });
+  const restored = next.plan.select(target, 'rebalance', { kind: 'jev', priorities: { [f.a]: { level: 1, score: 1 }, [f.b]: { level: 4, score: 4 } } });
   assert.deepEqual(restored.retiredIds, [f.a]);
   assert.deepEqual(restored.selection.restoredIds, [f.b]);
   commitSelection(f.manager, restored.retiredIds, 'working-set-v1');
@@ -70,12 +70,27 @@ test('the complete replacement edits only selected tool bodies and round-trips t
   assert.match(JSON.stringify(restored.payload), /NEWEST RESULT MUST SURVIVE/);
 });
 
+test('capture-order uses the same native view and preserves pins when newer archives swap in', () => {
+  const f = fixture();
+  commitSelection(f.manager, [f.b], 'working-set-v1');
+  const { plan, payload } = f.prepare([f.b]);
+  const target = { lowTokens: plan.floor.totalTokens + 1100, highTokens: plan.floor.totalTokens + 1600 };
+  assert.deepEqual(plan.candidates.map((item) => item.id), [f.a, f.b]);
+  const selected = plan.select(target, 'rebalance', { kind: 'capture-order' });
+  assert.deepEqual(selected.selection.restoredIds, [f.b]);
+  assert.deepEqual(selected.selection.displacedIds, [f.a]);
+  assert.match(JSON.stringify(selected.payload), /NEWEST RESULT MUST SURVIVE/);
+  assert.deepEqual((selected.payload as typeof payload).tools, payload.tools);
+  commitSelection(f.manager, selected.retiredIds, 'working-set-v1');
+  assert.deepEqual(f.prepare().payload, selected.payload);
+});
+
 test('unshortlisted archives remain stubbed, while tool-only restoration does not require resident scores', () => {
   const f = fixture();
   commitSelection(f.manager, [f.a, f.b], 'working-set-v1');
   const { plan } = f.prepare([f.a]);
   assert.deepEqual(plan.candidates.map((item) => item.id), [f.a]);
-  const selected = plan.select({ lowTokens: 8000, highTokens: 9000 }, 'restore-only', { [f.a]: { level: 3, score: 3 } });
+  const selected = plan.select({ lowTokens: 8000, highTokens: 9000 }, 'restore-only', { kind: 'jev', priorities: { [f.a]: { level: 3, score: 3 } } });
   assert.deepEqual(selected.retiredIds, [f.b]);
   assert.deepEqual(selected.selection.displacedIds, []);
 });
@@ -83,7 +98,7 @@ test('unshortlisted archives remain stubbed, while tool-only restoration does no
 test('a pinned floor stop returns the original request and cannot install partial retirements', () => {
   const f = fixture(), { payload, messages, history } = f.prepare();
   const plan = prepareWorkingSetView(payload, messages, history, model, { ...limits, maxRequestBytes: 1 }, []);
-  const result = plan.select({ lowTokens: 8000, highTokens: 9000 }, 'rebalance', { [f.a]: { level: 0, score: 0 }, [f.b]: { level: 0, score: 0 } });
+  const result = plan.select({ lowTokens: 8000, highTokens: 9000 }, 'rebalance', { kind: 'jev', priorities: { [f.a]: { level: 0, score: 0 }, [f.b]: { level: 0, score: 0 } } });
   assert.equal(result.selection.outcome, 'capacity-stop');
   assert.deepEqual(result.payload, payload);
   assert.deepEqual(result.retiredIds, []);
@@ -104,9 +119,9 @@ test('local planning checks its cancellation/deadline guard between trial measur
   const plan = prepareWorkingSetView(payload, messages, history, model, limits, [], undefined, () => {
     if (++checks === 9) throw new Error('local deadline');
   });
-  assert.throws(() => plan.select({ lowTokens: 1500, highTokens: 2000 }, 'rebalance', {
+  assert.throws(() => plan.select({ lowTokens: 1500, highTokens: 2000 }, 'rebalance', { kind: 'jev', priorities: {
     [f.a]: { level: 2, score: 2 }, [f.b]: { level: 1, score: 1 },
-  }), /local deadline/);
+  } }), /local deadline/);
   assert.equal(checks, 9);
   assert.equal(f.manager.getBranch().some((entry) => entry.type === 'context_edit'), false);
 });

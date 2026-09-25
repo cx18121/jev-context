@@ -14,7 +14,7 @@ import { INSTRUCTION_SOURCE_ENTRY, taskSources } from './task-sources.ts';
 import { validateTextCompletionConfig, type TextCompletionConfig } from './text-completion.ts';
 import { createUsageAnchor, type UsageAnchor } from './working-context.ts';
 import { prepareWorkingSetView } from './working-set-view.ts';
-import { underPressure, validateWorkingSetTarget, type WorkingSetTarget } from './working-set.ts';
+import { underPressure, validateWorkingSetTarget, type WorkingSetOrder, type WorkingSetTarget } from './working-set.ts';
 
 export const WORKING_POLICY = 'working-set-v1';
 export const SKETCH_ENTRY = 'jev-context/sketch';
@@ -26,7 +26,7 @@ export interface WorkingContextOptions {
   target: WorkingSetTarget;
   ranking: RankingLimits;
   sketch: TextCompletionConfig & { maxUpdates: number };
-  jev: JevConnection;
+  order: { kind: 'jev'; connection: JevConnection } | { kind: 'capture-order' };
   archiveLimit: number;
   decisionTimeoutMs: number;
 }
@@ -97,12 +97,14 @@ function activity(history: HistoryView) {
 /** New lifecycle integration boundary. Legacy callers migrate only after its wire contracts pass. */
 export function createWorkingContextExtension(manager: SessionManager, options: WorkingContextOptions): ExtensionFactory {
   validateTextCompletionConfig(options.sketch);
-  validateJevConnection(options.jev);
+  if (options.order.kind === 'jev') {
+    validateJevConnection(options.order.connection);
+    if (options.ranking.requestTimeoutMs !== options.order.connection.timeoutMs) throw new Error('Ranking reservation must use the actual Jev timeout');
+  }
   validateWorkingSetTarget(options.target, options.capacity.contextLimit);
   for (const value of [options.archiveLimit, options.decisionTimeoutMs, options.sketch.maxUpdates]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error('Invalid working-set decision bounds');
   }
-  if (options.ranking.requestTimeoutMs !== options.jev.timeoutMs) throw new Error('Ranking reservation must use the actual Jev timeout');
   planRanking({ taskSketch: '', recentActivity: null }, [], [], options.ranking);
   return (pi) => {
     let attempt: Attempt | undefined;
@@ -126,9 +128,9 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
       });
       if (!current.cancelled) ctx.ui.notify(`jev-context stopped: ${reason}`, 'error');
     }
-    function commit(ctx: ExtensionContext, current: Attempt, retiredIds: string[], data: unknown) {
+    function commit(ctx: ExtensionContext, current: Attempt, retiredIds: string[], data: Record<string, unknown>) {
       if (!sameBranch(ctx, current)) throw new Error('Session branch changed before selection commit');
-      try { commitSelection(manager, retiredIds, WORKING_POLICY, data); }
+      try { commitSelection(manager, retiredIds, WORKING_POLICY, { ...data, order: options.order.kind }); }
       catch (error) { writeFailed = true; throw error; }
       current.leafId = manager.getLeafId();
     }
@@ -231,7 +233,7 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
           return send(event.payload);
         }
         if (!view.candidates.length && !history.retiredIds.length) {
-          const selected = view.select(options.target, mode, {});
+          const selected = view.select(options.target, mode, options.order.kind === 'jev' ? { kind: 'jev', priorities: {} } : { kind: 'capture-order' });
           commit(ctx, current, history.retiredIds, { events, mode, reason: 'no-eligible-evidence', selection: selected.selection });
           return send(event.payload);
         }
@@ -267,32 +269,37 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
           { ...options.ranking, maxDurationMs: Math.min(options.ranking.maxDurationMs, remaining) });
         check();
         if (plan.outcome !== 'ready') throw new IncompleteSelection('Mandatory ranking exceeds decision limits');
-        const rejectedHashes = new Set(manager.getBranch().flatMap((entry) => {
-          if (entry.type !== 'custom' || entry.customType !== INFERENCE_RESULT_ENTRY) return [];
-          const result = entry.data as { kind?: string; outcome?: string; requestHash?: string };
-          return result.kind === 'ranking' && result.outcome === 'invalid_response' ? [result.requestHash] : [];
-        }));
-        if (plan.batches.some((batch) => rejectedHashes.has(batch.requestHash))) {
-          throw new IncompleteSelection('Identical ranking request was already rejected');
+        let order: WorkingSetOrder = { kind: 'capture-order' };
+        if (options.order.kind === 'jev') {
+          const connection = options.order.connection;
+          const rejectedHashes = new Set(manager.getBranch().flatMap((entry) => {
+            if (entry.type !== 'custom' || entry.customType !== INFERENCE_RESULT_ENTRY) return [];
+            const result = entry.data as { kind?: string; outcome?: string; requestHash?: string };
+            return result.kind === 'ranking' && result.outcome === 'invalid_response' ? [result.requestHash] : [];
+          }));
+          if (plan.batches.some((batch) => rejectedHashes.has(batch.requestHash))) {
+            throw new IncompleteSelection('Identical ranking request was already rejected');
+          }
+          const completed: Parameters<typeof collectRanking>[1][number][] = [];
+          for (const batch of plan.batches) {
+            check();
+            if (deadline - performance.now() < connection.timeoutMs) throw new IncompleteSelection('Insufficient time for reserved judge request');
+            const operationId = randomUUID();
+            append(ctx, current, INFERENCE_START_ENTRY, { version: 1, operationId, requestId: current.id, kind: 'ranking',
+              requestHash: batch.requestHash, requestBytes: batch.requestBytes, candidateIds: plan.candidateIds });
+            const result = await rankJev(batch.request, connection, ctx.signal);
+            append(ctx, current, INFERENCE_RESULT_ENTRY, { version: 1, operationId, requestId: current.id, kind: 'ranking', requestHash: batch.requestHash, ...result });
+            if (result.pricedCostUsd === null) throw new Error('Ranking request has unknown cost');
+            check();
+            if (result.outcome !== 'ok') throw new IncompleteSelection(`Ranking failed (${result.outcome})`);
+            completed.push({ requestHash: batch.requestHash, result });
+          }
+          const scores = collectRanking(plan, completed);
+          if (!scores) throw new IncompleteSelection('Ranking is incomplete');
+          order = { kind: 'jev', priorities: scores };
         }
-        const completed: Parameters<typeof collectRanking>[1][number][] = [];
-        for (const batch of plan.batches) {
-          check();
-          if (deadline - performance.now() < options.jev.timeoutMs) throw new IncompleteSelection('Insufficient time for reserved judge request');
-          const operationId = randomUUID();
-          append(ctx, current, INFERENCE_START_ENTRY, { version: 1, operationId, requestId: current.id, kind: 'ranking',
-            requestHash: batch.requestHash, requestBytes: batch.requestBytes, candidateIds: plan.candidateIds });
-          const result = await rankJev(batch.request, options.jev, ctx.signal);
-          append(ctx, current, INFERENCE_RESULT_ENTRY, { version: 1, operationId, requestId: current.id, kind: 'ranking', requestHash: batch.requestHash, ...result });
-          if (result.pricedCostUsd === null) throw new Error('Ranking request has unknown cost');
-          check();
-          if (result.outcome !== 'ok') throw new IncompleteSelection(`Ranking failed (${result.outcome})`);
-          completed.push({ requestHash: batch.requestHash, result });
-        }
-        const scores = collectRanking(plan, completed);
-        if (!scores) throw new IncompleteSelection('Ranking is incomplete');
         view = prepare(archives.filter((item) => plan.candidateIds.includes(item.id)).map((item) => item.id));
-        const selected = view.select(options.target, mode, scores);
+        const selected = view.select(options.target, mode, order);
         check();
         if (selected.selection.outcome !== 'selected') throw new IncompleteSelection('Working-set packing is incomplete');
         current.measured = selected.selection.after;

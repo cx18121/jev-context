@@ -4,7 +4,7 @@ import { measureCapacity, type CapacityLimits } from './budget.ts';
 import { buildView, retirementText, validateSelection, type HistoryView } from './history.ts';
 import { isToolOutput, mapProviderEvidence, providerText, readProviderPayload, replaceProviderText } from './provider-view.ts';
 import type { UsageAnchor } from './working-context.ts';
-import { packWorkingSet, type Priority, type WorkingSetItem, type WorkingSetTarget } from './working-set.ts';
+import { packWorkingSet, type WorkingSetOrder, type WorkingSetItem, type WorkingSetTarget } from './working-set.ts';
 
 /** Bind the packer's item IDs to exact provider outputs; all other request fields are immutable. */
 export function prepareWorkingSetView(
@@ -58,8 +58,8 @@ export function prepareWorkingSetView(
         return trial.admitted && trial.totalTokens <= ceiling;
       })()).map((item) => item.id);
     },
-    select(target: WorkingSetTarget, mode: 'rebalance' | 'restore-only', scores: Readonly<Record<string, Priority>>) {
-      const selection = packWorkingSet(items, target, mode, scores, measure);
+    select(target: WorkingSetTarget, mode: 'rebalance' | 'restore-only', order: WorkingSetOrder) {
+      const selection = packWorkingSet(items, target, mode, order, measure);
       checkWork();
       if (selection.outcome !== 'selected') return { payload: structuredClone(source), retiredIds: [...retired], selection };
       const visible = new Set(selection.visibleIds), proposedRetired = new Set(retired);
