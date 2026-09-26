@@ -47,6 +47,26 @@ test('median ties at one half use the lower level despite floating-point roundof
   } finally { await fixture.close(); }
 });
 
+test('independently rounded live answers are accepted, while larger inconsistencies are not', async () => {
+  // Recorded from jev-1.13.0 on 2026-09-25. Probabilities give 0.87 and 2.57; Jev reported 0.88 and 2.56.
+  const live = [[[0.27, 0.62, 0.08, 0.03, 0], 0.88, 1], [[0, 0.13, 0.2, 0.64, 0.03], 2.56, 3]] as const;
+  const fixture = await createJevFixture();
+  try {
+    for (const [probabilities, score, level] of live) {
+      fixture.respond(() => ({ body: { model: JEV_MODEL, answers: { item: { ...scoreAnswer([...probabilities]), score } },
+        usage: { input_tokens: 1000, output_tokens: 20 } } }));
+      const answer = await rankJev(request, fixture.config, new AbortController().signal);
+      assert.equal(answer.outcome, 'ok');
+      assert.deepEqual(answer.priorities, { item: { level, score } });
+    }
+    for (const [probabilities, score] of [[[0.27, 0.62, 0.08, 0.03, 0], 0.95], [[0.3, 0.62, 0.08, 0.03, 0], 0.93]] as const) {
+      fixture.respond(() => ({ body: { model: JEV_MODEL, answers: { item: { ...scoreAnswer([...probabilities]), score } },
+        usage: { input_tokens: 1000, output_tokens: 20 } } }));
+      assert.equal((await rankJev(request, fixture.config, new AbortController().signal)).outcome, 'invalid_response');
+    }
+  } finally { await fixture.close(); }
+});
+
 test('malformed Score answers never become usable rankings, while known spend survives rejection', async () => {
   const fixture = await createJevFixture();
   try {

@@ -61,7 +61,12 @@ function tokens(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-/** Five ordinal levels. Use the lower median, with the expected value only as a within-level tie break. */
+/** Jev rounds each probability and the score to two decimals independently. Five probabilities can
+ * each be off by 0.005, and the reported expected score by that sum plus its own rounding. */
+const PROBABILITY_SUM_TOLERANCE = 0.03;
+const SCORE_TOLERANCE = 0.06;
+
+/** Five ordinal levels. Use the lower median, with the reported score only as a within-level tie break. */
 export async function rankJev(
   request: JevRequest<JevScoreQuestion>, config: JevConnection, signal: AbortSignal,
 ): Promise<JevRankingResult> {
@@ -71,18 +76,23 @@ export async function rankJev(
         Object.keys(probabilities).length !== 5 || Object.keys(legend).length !== 5 ||
         typeof answer.score !== 'number' || !Number.isFinite(answer.score) || answer.score < 0 || answer.score > 4 ||
         typeof answer.confidence !== 'number' || !Number.isFinite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1) return null;
-    let total = 0, expected = 0, level = -1;
+    const values: number[] = [];
     for (let i = 0; i < 5; i++) {
       const p = probabilities[String(i)];
       if (!Object.hasOwn(probabilities, String(i)) || typeof p !== 'number' || !Number.isFinite(p) || p < 0 || p > 1 ||
           legend[String(i)] !== question.criteria[i]) return null;
-      total += p;
-      expected += i * p;
-      if (level < 0 && total >= 0.5 - Number.EPSILON * 5) level = i;
+      values.push(p);
     }
-    // Permit serialization roundoff, not malformed distributions or inconsistent scores.
-    if (Math.abs(total - 1) > 1e-6 || Math.abs(answer.score - expected) > 1e-6 || level < 0) return null;
-    return { level, score: expected };
+    const total = values.reduce((sum, p) => sum + p, 0);
+    const expected = values.reduce((sum, p, i) => sum + i * p, 0);
+    // Permit documented rounding, not malformed distributions or inconsistent scores.
+    if (Math.abs(total - 1) > PROBABILITY_SUM_TOLERANCE || Math.abs(answer.score - expected) > SCORE_TOLERANCE) return null;
+    let cumulative = 0, level = -1;
+    for (let i = 0; i < 5 && level < 0; i++) {
+      cumulative += values[i]!;
+      if (cumulative >= total / 2 - Number.EPSILON * 5) level = i;
+    }
+    return { level, score: answer.score };
   });
   return { ...metadata, priorities: values };
 }
