@@ -388,6 +388,26 @@ for (const [kind, recorded, judged, restored] of [
   });
 }
 
+test('restoration off clears under pressure without sketch, Jev, or later restoration', async () => {
+  const f = await fixture();
+  try {
+    f.options.order = { kind: 'capture-order' };
+    f.options.restoration = false;
+    const manager = SessionManager.inMemory(f.pi.directory);
+    const { old } = seed(manager, false, 14000);
+    const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
+    await run.session.prompt('Finish invoice API contract.');
+    assert.deepEqual(history(manager).retiredIds, [old]);
+    const decisions = entries(manager, SELECTION_ENTRY).length;
+    await run.session.prompt('A new instruction that would otherwise reconsider archives.');
+    assert.deepEqual(history(manager).retiredIds, [old]);
+    assert.equal(entries(manager, SELECTION_ENTRY).length, decisions);
+    assert.equal(f.sketches(), 0);
+    assert.equal(f.judge.requests.length, 0);
+    assert.deepEqual(run.errors, []);
+  } finally { await f.close(); }
+});
+
 test('pressure with only pinned content above the low mark records target miss without inference', async () => {
   const f = await fixture();
   try {

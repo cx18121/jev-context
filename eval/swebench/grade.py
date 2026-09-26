@@ -64,13 +64,15 @@ def main(run, dataset):
     save(output / 'manifest.json', {'graderSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
          'swebenchVersion': SWE_VERSION, 'datasetSha256': dataset_sha,
          'trajectoryReportSha256': hashlib.sha256((run / 'report.json').read_bytes()).hexdigest()})
-    if [arm['phase'] for arm in trajectory['arms']] != ['control', 'selector']:
-        raise ValueError('Expected exactly control and selector arms')
+    known = ['default', 'clearing', 'control', 'selector']
+    phases = [arm['phase'] for arm in trajectory['arms']]
+    if not phases or phases != [phase for phase in known if phase in phases]:
+        raise ValueError('Arms must be known, distinct and in canonical order')
     outcomes = []
     try:
         for arm in trajectory['arms']:
             name = arm['phase']
-            if name not in ['control', 'selector']:
+            if name not in known:
                 raise ValueError('Unknown arm')
             if not arm.get('patch'):
                 outcomes.append({'arm': name, 'resolved': None, 'status': 'no-captured-patch'})

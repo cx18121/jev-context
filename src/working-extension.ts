@@ -48,6 +48,8 @@ export interface WorkingContextOptions {
   order: { kind: 'jev'; connection: JevConnection } | { kind: 'capture-order' };
   archiveLimit: number;
   decisionTimeoutMs: number;
+  /** False disables archive lookup and restoration: pressure clears evidence and nothing returns. */
+  restoration?: boolean;
 }
 
 interface DecisionEvents { userId: string | null; focusHash: string }
@@ -269,8 +271,11 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
         const { focusHash, recent } = activity(history);
         const events: Checkpoint = { userId: user?.id ?? null, focusHash, ...(prior?.archiveCursor && { archiveCursor: prior.archiveCursor }) };
         const pressure = underPressure(view.before, options.target);
-        const correction = history.retiredIds.length > 0 && events.userId !== prior?.userId;
-        const toolChange = history.retiredIds.length > 0 && history.newestExchangeIds.length > 0 && focusHash !== prior?.focusHash;
+        const restores = options.restoration !== false;
+        const correction = restores && history.retiredIds.length > 0 && events.userId !== prior?.userId;
+        const toolChange = restores && history.retiredIds.length > 0 && history.newestExchangeIds.length > 0 && focusHash !== prior?.focusHash;
+        // Capture order only needs the sketch to query the archive.
+        const needsSketch = restores || options.order.kind === 'jev';
         if (!pressure && !correction && !toolChange) return send(event.payload);
         const mode = pressure || correction ? 'rebalance' : 'restore-only';
         if (mode === 'restore-only' && view.before.totalTokens >= Math.max(options.target.lowTokens, view.floor.totalTokens)) {
@@ -288,9 +293,11 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
         const oldSummary = existing?.type === 'custom'
           ? validateTaskSketch(existing.data, taskSources(manager.getBranch())).summary : '';
         let sketch: TaskSketch | undefined;
-        if (mode === 'rebalance') sketch = await refreshSketch(ctx, current, event.payload, check, deadline);
+        if (mode === 'rebalance' && needsSketch) sketch = await refreshSketch(ctx, current, event.payload, check, deadline);
         const query = `${sketch?.summary ?? oldSummary}\n${recent.text}`;
-        const lookup = exploreArchive(history, query, options.archiveLimit, prior?.archiveCursor);
+        const lookup = restores ? exploreArchive(history, query, options.archiveLimit, prior?.archiveCursor)
+          : { version: 'restoration-off' as const, queryTerms: [], poolSize: 0, matchedCount: 0, candidates: [], pageIds: [],
+            wrapped: false, resetReason: null, nextCursor: prior?.archiveCursor ?? { version: 1 as const, afterId: null } };
         view = prepare(lookup.candidates.map((item) => item.evidence.id));
         const retired = retirements(manager.getBranch());
         // Level 4 cannot be exceeded, so those archives are held back without paying for a judgment.
@@ -305,7 +312,7 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
           return send(event.payload);
         }
         if (fitting) view = prepare(lookup.candidates.filter((item) => fitting.has(item.evidence.id)).map((item) => item.evidence.id));
-        sketch ??= await refreshSketch(ctx, current, event.payload, check, deadline);
+        if (needsSketch) sketch ??= await refreshSketch(ctx, current, event.payload, check, deadline);
         const candidate = (item: typeof view.candidates[number]): RankingCandidate => ({ id: item.id,
           toolCall: item.evidence.call, capturedAt: item.capturedAt, isError: item.evidence.result.isError, text: item.text });
         const residents = mode === 'rebalance' ? view.candidates.filter((item) => item.resident).map(candidate) : [];
@@ -313,7 +320,7 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
         const archives = lookup.candidates.flatMap((item) => { const found = byId.get(item.evidence.id); return found && !found.resident ? [candidate(found)] : []; });
         const remaining = Math.floor(deadline - performance.now());
         if (remaining < 1) throw new IncompleteSelection('Working-set decision deadline exceeded');
-        const plan = planRanking({ taskSketch: sketch.summary, recentActivity: recent }, residents, archives,
+        const plan = planRanking({ taskSketch: sketch?.summary ?? '', recentActivity: recent }, residents, archives,
           { ...options.ranking, maxDurationMs: Math.min(options.ranking.maxDurationMs, remaining) });
         check();
         if (plan.outcome !== 'ready') throw new IncompleteSelection('Mandatory ranking exceeds decision limits');

@@ -21,8 +21,16 @@ import { guardedSketch, SKETCH_REQUEST_BYTES } from './sketch.mjs';
 process.umask(0o077);
 const [mode, taskFile, output, ...extra] = process.argv.slice(2);
 assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--live'].includes(mode)
-  && taskFile && output && extra.length === 0, 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY');
+  && taskFile && output && extra.length <= 1 && extra.every((a) => a.startsWith('--arms=')), 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY [--arms=a,b]');
 const live = mode === '--live';
+// default: unmodified Pi with native compaction. clearing: threshold clearing, no restoration, sketch, or Jev.
+// control: capture order with earned restoration. selector: Jev ranking with earned restoration.
+const ARM_ORDER = ['default', 'clearing', 'control', 'selector'];
+const arms = extra.length ? extra[0].slice('--arms='.length).split(',') : live ? ARM_ORDER : ['control', 'selector'];
+assert.ok(arms.length > 0 && new Set(arms).size === arms.length && arms.every((a) => ARM_ORDER.includes(a))
+  && arms.every((a, i) => i === 0 || ARM_ORDER.indexOf(arms[i - 1]) < ARM_ORDER.indexOf(a)), 'Arms must be distinct and in canonical order');
+const pairContract = arms.length === 2 && arms[0] === 'control' && arms[1] === 'selector';
+assert.ok(live || mode === '--local' || pairContract, 'Failure fixtures exercise the control and selector arms');
 const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const root = new URL('./', import.meta.url);
 const run = pathToFileURL(resolve(output) + '/');
@@ -35,9 +43,9 @@ const catalog = JSON.parse(await readFile(new URL('../../node_modules/@earendil-
 const pinned = catalog['openai-codex-responses']['gpt-5.6-sol'];
 const prices = pinned.cost;
 const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
-const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : 24, judgeRequests: 24, requestMs: 90000,
-  runMs: 2400000, toolSeconds: 120, requestBytes: 180000, responseBytes: 512000, catalogStopUsd: 3,
-  sketchRequests: 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
+const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : live ? 60 : 24, judgeRequests: live ? 60 : 24, requestMs: 90000,
+  runMs: live ? 7200000 : 2400000, toolSeconds: 120, requestBytes: live ? 1000000 : 180000, responseBytes: 512000, catalogStopUsd: live ? 12 : 3,
+  sketchRequests: live ? 60 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
 const target = { lowTokens: 20000, highTokens: 24576, restoreHeadroomTokens: 4000 };
 const ranking = { maxPairBytes: 30000, maxRequestBytes: 60000, maxRequests: 8, maxSegments: 256,
@@ -189,7 +197,7 @@ async function arm(phase, instruction) {
     } });
     bash.description = 'Execute bash in the offline /testbed container. Returns a prefix of stdout and stderr, at most 32000 bytes and 2000 lines including a truncation notice. Discarded output is not saved. Narrow commands when output is truncated. Commands have a maximum timeout of 120 seconds.';
     bash.executionMode = 'sequential';
-    const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
+    const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: phase === 'default' }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const guard = () => assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd,
       'Run stopped by accounting, cost, or deadline');
     const sketch = guardedSketch({ runtime, model: sketchModel, sessionId: manager.getSessionId(), phase, bounds, deadline,
@@ -197,11 +205,12 @@ async function arm(phase, instruction) {
       unknownCost(reason) { report.accountingComplete = false; fail(reason); } });
     const policy = { capacity, target, ranking, archiveLimit: decision.archiveLimit, decisionTimeoutMs: decision.decisionTimeoutMs,
       sketch: { ...sketch, maxUpdates: decision.sketchMaxUpdates },
-      order: phase === 'control' ? { kind: 'capture-order' }
-        : { kind: 'jev', connection: { timeoutMs: ranking.requestTimeoutMs, apiKey: jevKey, endpoint: judgeEndpoint } } };
+      restoration: phase !== 'clearing',
+      order: phase === 'selector' ? { kind: 'jev', connection: { timeoutMs: ranking.requestTimeoutMs, apiKey: jevKey, endpoint: judgeEndpoint } }
+        : { kind: 'capture-order' } };
     const loader = new DefaultResourceLoader({ cwd, agentDir: `${cwd}/agent`, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [createWorkingContextExtension(manager, policy)], systemPromptOverride: () => systemPrompt, appendSystemPromptOverride: () => [] });
+      extensionFactories: phase === 'default' ? [] : [createWorkingContextExtension(manager, policy)], systemPromptOverride: () => systemPrompt, appendSystemPromptOverride: () => [] });
     await loader.reload();
     const created = await createAgentSession({ cwd, agentDir: `${cwd}/agent`, modelRuntime: runtime, model, sessionManager: manager,
       settingsManager: settings, resourceLoader: loader, tools: ['bash', 'read'], customTools: [bash, sandboxReadTool(sandbox, deadline)], thinkingLevel: 'medium' });
@@ -283,6 +292,7 @@ async function arm(phase, instruction) {
     const records = (kind) => entries.filter((e) => e.type === 'custom' && e.customType === kind).map((e) => e.data);
     outcome.stops = records(STOP_ENTRY); outcome.deferrals = records(DEFERRAL_ENTRY);
     outcome.selections = records(SELECTION_ENTRY); outcome.nativeEdits = entries.filter((e) => e.type === 'context_edit');
+    outcome.compactions = entries.filter((e) => e.type === 'compaction').length;
     outcome.extensionUsage = records(USAGE_ENTRY);
     const starts = records(INFERENCE_START_ENTRY), results = records(INFERENCE_RESULT_ENTRY);
     outcome.sketchStarts = starts.filter((r) => r.kind === 'sketch');
@@ -335,12 +345,12 @@ try {
   const instruction = task.problemStatement;
   await save('agent-task.json', task);
   await save('manifest.json', { version: 2, lifecycle: WORKING_POLICY, mode, instanceId: task.instanceId, base: task.baseCommit, image: task.image, piVersion: pkg.version,
-    model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: ['control', 'selector'], orders: { control: 'capture-order', selector: 'jev' }, bounds, capacity, target, ranking, decision,
+    model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: arms, orders: { default: 'pi-native-compaction', clearing: 'capture-order-no-restoration', control: 'capture-order', selector: 'jev' }, bounds, capacity, target, ranking, decision,
     taskSha256: sha(JSON.stringify(task)), instructionSha256: sha(instruction), sourceHashes, prices, systemPrompt,
     sketch: { model: 'openai-codex/gpt-6-luna', reasoning: 'low', prices: pinnedSketch.cost,
       mode: live ? 'live' : 'scripted-http-real-sdk', outputTokenCapEnforced: false },
     limits: ['One development task, one fresh trajectory per arm. Not a causal quality/cost estimate.',
-      'Both arms use the working-set lifecycle, sketch and candidate planner. Control uses capture order without Jev calls. Neither arm uses normal Pi resources or compaction.',
+      'Default runs unmodified Pi with native compaction and no manager. Clearing, control and selector share the working-set packer and targets. Clearing never restores and makes no sketch or Jev calls. Control uses capture order with earned restoration. Selector uses Jev ranking. No arm loads normal Pi resources.',
       'Fixed order, different session/cache keys do not guarantee independent provider caches. Natural trajectories differ.',
       'Token-denominated estimates and a separate transport-byte ceiling. Ranking priority is not a safety judgment. No retuning/retry in this run.',
       'Shared sketch and run caps can interfere across arms. Natural trajectories and remaining decision time can change candidate pools.',
@@ -349,12 +359,21 @@ try {
       'Private local ignored artifacts, including opaque reasoning. No automatic publication or backup.',
       'Native grading separately checks patches; incomplete trajectories remain incomplete even if their patches pass.'] });
   await setup();
-  for (const phase of ['control', 'selector']) {
+  for (const phase of arms) {
     if (!report.accountingComplete || deadline.aborted || spent() >= bounds.catalogStopUsd) { report.arms.push({ phase, completed: false, skipped: 'Accounting or deadline stop' }); continue; }
     await arm(phase, instruction);
   }
   report.completed = report.arms.every((a) => a.completed);
-  if (mode === '--local') {
+  if (mode === '--local' && !pairContract) {
+    // Smoke contract for baseline arms: complete, accounted, and only the managed arms edit history.
+    assert.ok(report.completed, JSON.stringify(report.arms.map((a) => a.failure)));
+    for (const outcome of report.arms) {
+      assert.equal(outcome.nativeEdits.length > 0, outcome.phase !== 'default', `${outcome.phase} native edits`);
+      assert.equal(outcome.compactions, 0);
+      assert.equal(outcome.sketchStarts.length > 0, !['default', 'clearing'].includes(outcome.phase), `${outcome.phase} sketch use`);
+      assert.equal(outcome.rankingStarts.length > 0, outcome.phase === 'selector', `${outcome.phase} ranking use`);
+    }
+  } else if (mode === '--local') {
     assert.ok(report.completed, JSON.stringify(report.arms.map((a) => a.failure)));
     assert.equal(report.requests.filter((r) => r.dispatched).length, 10);
     assert.ok(report.judgeDispatches > 0);

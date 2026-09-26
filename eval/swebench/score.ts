@@ -39,7 +39,10 @@ async function main(runPath: string, referencePath: string) {
   assert.ok(reference.contextbenchId);
   const { source, excluded } = await read('source.json');
   const trajectory = await read('report.json');
-  assert.deepEqual(trajectory.arms.map((a: { phase: string }) => a.phase), ['control', 'selector']);
+  const known = ['default', 'clearing', 'control', 'selector'];
+  const phases: string[] = trajectory.arms.map((a: { phase: string }) => a.phase);
+  assert.deepEqual(phases, known.filter((phase) => phases.includes(phase)), 'Arms must be known, distinct and in canonical order');
+  assert.ok(phases.length > 0);
   const arms = [];
   for (const arm of trajectory.arms) {
     if (arm.skipped) { arms.push({ phase: arm.phase, status: 'skipped', reason: arm.skipped }); continue; }
