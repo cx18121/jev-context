@@ -43,14 +43,18 @@ const catalog = JSON.parse(await readFile(new URL('../../node_modules/@earendil-
 const pinned = catalog['openai-codex-responses']['gpt-5.6-sol'];
 const prices = pinned.cost;
 const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
-const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : live ? 60 : 24, judgeRequests: live ? 60 : 24, requestMs: 90000,
-  runMs: live ? 7200000 : 2400000, toolSeconds: 120, requestBytes: live ? 1000000 : 180000, responseBytes: 512000, catalogStopUsd: live ? 12 : 3,
-  sketchRequests: live ? 60 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
-const capacity = { contextLimit: 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
-const target = { lowTokens: 20000, highTokens: 24576, restoreHeadroomTokens: 4000 };
-const ranking = { maxPairBytes: 30000, maxRequestBytes: 60000, maxRequests: 8, maxSegments: 256,
-  maxInputBytes: 480000, maxCostUsd: 0.1, requestTimeoutMs: 15000, maxDurationMs: 120000 };
-const decision = { archiveLimit: 4, decisionTimeoutMs: 180000, sketchMaxUpdates: 4 };
+// Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
+// fixtures keep the small profile their scripted usage is built around.
+const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: 90000,
+  runMs: live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: 512000, catalogStopUsd: live ? 30 : 3,
+  sketchRequests: live ? 150 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
+const capacity = { contextLimit: live ? 256000 : 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
+const target = live ? { lowTokens: 32000, highTokens: 100000, restoreHeadroomTokens: 8000 }
+  : { lowTokens: 20000, highTokens: 24576, restoreHeadroomTokens: 4000 };
+// 120KB is about 53k tokens at the worst observed 2.27 bytes per Jev token, under Jev's 64k request limit.
+const ranking = { maxPairBytes: 30000, maxRequestBytes: live ? 120000 : 60000, maxRequests: live ? 16 : 8, maxSegments: live ? 512 : 256,
+  maxInputBytes: live ? 2000000 : 480000, maxCostUsd: live ? 0.2 : 0.1, requestTimeoutMs: 15000, maxDurationMs: live ? 240000 : 120000 };
+const decision = { archiveLimit: live ? 8 : 4, decisionTimeoutMs: live ? 360000 : 180000, sketchMaxUpdates: 4 };
 const systemPrompt = 'Fix the supplied Python repository issue in /testbed. Use read to inspect source files, with offset/limit for focused reads. Use bash to search, edit, and test. Commands execute in an isolated offline container. Do not commit. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds. Use the source and available tests, not network access. Finish with a concise summary of the fix and tests.';
 const report = { version: 2, lifecycle: WORKING_POLICY, developmentOnly: true, mode, completed: false,
   accountingComplete: true, arms: [], requests: [], sketchRequests: [], judgeRequests: [], judgeDispatches: 0 };
@@ -242,8 +246,11 @@ async function arm(phase, instruction) {
           record.afterBytes = Buffer.byteLength(JSON.stringify(after));
           record.changedOutputs = after.input.flatMap((item, i) => item.output !== before.input[i]?.output ? [item.call_id] : []);
           assert.equal(after.store, false); assert.equal(after.previous_response_id, undefined);
-          assert.equal(after.reasoning?.effort, 'medium');
-          assert.equal(after.prompt_cache_key, manager.getSessionId());
+          // Native compaction in the default arm may send its summary request without session identity.
+          if (phase !== 'default' || after.prompt_cache_key !== undefined) {
+            assert.equal(after.reasoning?.effort, 'medium');
+            assert.equal(after.prompt_cache_key, manager.getSessionId());
+          }
           assert.ok(record.afterBytes <= bounds.requestBytes);
           inspected = structuredClone(after); return after;
         },
@@ -255,7 +262,7 @@ async function arm(phase, instruction) {
           const bytes = Buffer.from(init.body);
           const wire = JSON.parse((headers.get('content-encoding') === 'zstd' ? zstdDecompressSync(bytes) : bytes).toString());
           assert.deepEqual(wire, inspected);
-          assert.equal(headers.get('session-id'), manager.getSessionId());
+          if (phase !== 'default' || headers.get('session-id') !== null) assert.equal(headers.get('session-id'), manager.getSessionId());
           const capture = captureRequest({ sessionId: manager.getSessionId(), requestId: `${phase}-${turn}`,
             branch: manager.getBranch(), payload: wire, model, source: sourceSnapshot });
           await save(`${phase}-${turn}-request.json`, wire);
