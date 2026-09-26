@@ -25,7 +25,7 @@ test('sandbox read paths do not resolve shorthand, host paths, or native Unicode
 
 test('native read uses container operations despite host context, preserving exact footers', async () => {
   const paths: string[] = [];
-  const tool = sandboxReadTool({ async read(path, signal) {
+  const tool = sandboxReadTool({ root: '/testbed', async read(path, signal) {
     paths.push(path); signal?.throwIfAborted(); return Buffer.from('one\ntwo\nthree\n');
   } }, new AbortController().signal);
   const result = await tool.execute('call', { path: 'src/a.py', offset: 2, limit: 1 }, undefined, undefined,

@@ -13,7 +13,7 @@ import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, Mo
 import { createWorkingContextExtension, INFERENCE_START_ENTRY, INFERENCE_RESULT_ENTRY, STOP_ENTRY, USAGE_ENTRY, DEFERRAL_ENTRY, WORKING_POLICY } from '../../src/working-extension.ts';
 import { SELECTION_ENTRY } from '../../src/history.ts';
 import { JEV_ENDPOINT, JEV_MODEL } from '../../src/jev.ts';
-import { Sandbox, parseTask, sandboxReadTool } from './sandbox.ts';
+import { Sandbox, parseTask, sandboxReadTool, taskInstruction, taskRoot } from './sandbox.ts';
 import { captureRequest } from '../contextbench.ts';
 import { tapResponse } from './codex-accounting.mjs';
 import { guardedSketch, SKETCH_REQUEST_BYTES } from './sketch.mjs';
@@ -32,21 +32,25 @@ assert.ok(arms.length > 0 && new Set(arms).size === arms.length && arms.every((a
 const pairContract = arms.length === 2 && arms[0] === 'control' && arms[1] === 'selector';
 assert.ok(live || mode === '--local' || pairContract, 'Failure fixtures exercise the control and selector arms');
 const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
-const root = new URL('./', import.meta.url);
+const lhtb = task.kind === 'lhtb';
+const root = taskRoot(task);
+// LHTB arms run as separate processes, so each gets its own deadline and they can run in parallel.
+assert.ok(!lhtb || ((live || mode === '--local') && extra.length === 1 && arms.length === 1), 'LHTB runs are live or --local smoke, one explicit arm per process');
+const moduleRoot = new URL('./', import.meta.url);
 const run = pathToFileURL(resolve(output) + '/');
 await mkdir(run, { mode: 0o700 });
 const save = (name, data) => writeFile(new URL(name, run), JSON.stringify(data, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
 const sha = (data) => createHash('sha256').update(data).digest('hex');
-const pkg = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-coding-agent/package.json', root)));
+const pkg = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-coding-agent/package.json', moduleRoot)));
 assert.equal(pkg.version, '0.87.1');
-const catalog = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-ai/dist/providers/data/openai-codex.json', root)));
+const catalog = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-ai/dist/providers/data/openai-codex.json', moduleRoot)));
 const pinned = catalog['openai-codex-responses']['gpt-5.6-sol'];
 const prices = pinned.cost;
 const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 // Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
 // fixtures keep the small profile their scripted usage is built around.
-const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: 90000,
-  runMs: live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: 512000, catalogStopUsd: live ? 30 : 3,
+const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: 90000,
+  runMs: lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
   sketchRequests: live ? 150 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: live ? 256000 : 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
 const target = live ? { lowTokens: 32000, highTokens: 100000, restoreHeadroomTokens: 8000 }
@@ -55,7 +59,8 @@ const target = live ? { lowTokens: 32000, highTokens: 100000, restoreHeadroomTok
 const ranking = { maxPairBytes: 30000, maxRequestBytes: live ? 120000 : 60000, maxRequests: live ? 16 : 8, maxSegments: live ? 512 : 256,
   maxInputBytes: live ? 2000000 : 480000, maxCostUsd: live ? 0.2 : 0.1, requestTimeoutMs: 15000, maxDurationMs: live ? 240000 : 120000 };
 const decision = { archiveLimit: live ? 8 : 4, decisionTimeoutMs: live ? 360000 : 180000, sketchMaxUpdates: 4 };
-const systemPrompt = 'Fix the supplied Python repository issue in /testbed. Use read to inspect source files, with offset/limit for focused reads. Use bash to search, edit, and test. Commands execute in an isolated offline container. Do not commit. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds. Use the source and available tests, not network access. Finish with a concise summary of the fix and tests.';
+const systemPrompt = lhtb ? `Complete the task described by the user inside an offline container. Your workspace is ${root}. Use read to inspect text files, with offset/limit for focused reads. Use bash to run commands, edit files, and test. Commands execute in an isolated container with no network access. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds; run longer jobs in the background and poll them. The task instructions define when the work is complete, so keep working until they are satisfied. Finish with a concise summary.`
+  : 'Fix the supplied Python repository issue in /testbed. Use read to inspect source files, with offset/limit for focused reads. Use bash to search, edit, and test. Commands execute in an isolated offline container. Do not commit. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds. Use the source and available tests, not network access. Finish with a concise summary of the fix and tests.';
 const report = { version: 2, lifecycle: WORKING_POLICY, developmentOnly: true, mode, completed: false,
   accountingComplete: true, arms: [], requests: [], sketchRequests: [], judgeRequests: [], judgeDispatches: 0 };
 const deadline = AbortSignal.timeout(bounds.runMs);
@@ -125,7 +130,7 @@ async function setup() {
     sketchModel = runtime.getModel('jev-pair-fixture', 'gpt-6-luna');
   } else {
     // Read exactly the authorized judge key; never load the file into process.env or Docker.
-    jevKey = parseEnv(await readFile(new URL('../../.env', root), 'utf8')).TYPESAFE_API_KEY;
+    jevKey = parseEnv(await readFile(new URL('../../.env', moduleRoot), 'utf8')).TYPESAFE_API_KEY;
     assert.ok(jevKey?.trim(), 'Missing TYPESAFE_API_KEY');
     runtime = await ModelRuntime.create(options);
     model = runtime.getModel('openai-codex', 'gpt-5.6-sol');
@@ -181,7 +186,12 @@ async function arm(phase, instruction) {
   try {
     await sandbox.start();
     outcome.configuration = sandbox.configuration;
-    if (!sourceSnapshot) {
+    if (lhtb && !live && !fixturePaths) {
+      const found = await sandbox.command("find . -name '*.py' -size +2k -not -path '*/.*' | sort | head -2", { seconds: 30 });
+      fixturePaths = found.text.trim().split('\n').filter(Boolean).map((path) => path.replace(/^\.\//, ''));
+      assert.equal(fixturePaths.length, 2, 'Local fixture needs two source files');
+    }
+    if (!lhtb && !sourceSnapshot) {
       const snapshot = await sandbox.snapshot();
       sourceSnapshot = snapshot.source;
       await save('source.json', snapshot);
@@ -189,7 +199,7 @@ async function arm(phase, instruction) {
         && Buffer.byteLength(text) >= 2000).slice(0, 2).map(([path]) => path);
       if (!live) assert.equal(fixturePaths.length, 2, 'Local fixture needs two source files');
     } // Each arm verifies the same prepared image; coverage retains the immutable dataset base.
-    const bash = createBashToolDefinition('/testbed', { exposeSessionEnvironment: false, operations: {
+    const bash = createBashToolDefinition(root, { exposeSessionEnvironment: false, operations: {
       async exec(command, _cwd, options) {
         // SDK context cwd is the isolated host session directory. Never execute there.
         try {
@@ -199,7 +209,8 @@ async function arm(phase, instruction) {
         } catch (e) { fail(`Sandbox stopped: ${errorText(e)}`); throw e; }
       },
     } });
-    bash.description = 'Execute bash in the offline /testbed container. Returns a prefix of stdout and stderr, at most 32000 bytes and 2000 lines including a truncation notice. Discarded output is not saved. Narrow commands when output is truncated. Commands have a maximum timeout of 120 seconds.';
+    bash.description = (lhtb ? `Execute bash in the offline container, starting in ${root}.` : 'Execute bash in the offline /testbed container.')
+      + ' Returns a prefix of stdout and stderr, at most 32000 bytes and 2000 lines including a truncation notice. Discarded output is not saved. Narrow commands when output is truncated. Commands have a maximum timeout of 120 seconds.';
     bash.executionMode = 'sequential';
     const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: phase === 'default' }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const guard = () => assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd,
@@ -263,11 +274,11 @@ async function arm(phase, instruction) {
           const wire = JSON.parse((headers.get('content-encoding') === 'zstd' ? zstdDecompressSync(bytes) : bytes).toString());
           assert.deepEqual(wire, inspected);
           if (phase !== 'default' || headers.get('session-id') !== null) assert.equal(headers.get('session-id'), manager.getSessionId());
-          const capture = captureRequest({ sessionId: manager.getSessionId(), requestId: `${phase}-${turn}`,
+          const capture = sourceSnapshot && captureRequest({ sessionId: manager.getSessionId(), requestId: `${phase}-${turn}`,
             branch: manager.getBranch(), payload: wire, model, source: sourceSnapshot });
           await save(`${phase}-${turn}-request.json`, wire);
           signal.throwIfAborted(); guard();
-          record.dispatched = true; record.wireSha256 = sha(JSON.stringify(wire)); captures.push(capture);
+          record.dispatched = true; record.wireSha256 = sha(JSON.stringify(wire)); if (capture) captures.push(capture);
           const dispatchStart = performance.now();
           record.preDispatchMs = Math.round(dispatchStart - requestStart);
           const response = await nativeFetch(url, { ...init,
@@ -333,8 +344,13 @@ async function arm(phase, instruction) {
     session?.dispose(); deadline.removeEventListener('abort', abortRun);
     if (!sandbox.dead) {
       try {
-        const patch = await sandbox.patch(); outcome.patch = `${phase}.patch`; outcome.patchBytes = Buffer.byteLength(patch);
-        await writeFile(new URL(outcome.patch, run), patch, { flag: 'wx', mode: 0o600 });
+        if (lhtb) {
+          outcome.finalImage = `jev-lhtb-final:${sandbox.name.slice('jev-eval-'.length)}`;
+          outcome.finalImageId = await sandbox.commitFinal(outcome.finalImage);
+        } else {
+          const patch = await sandbox.patch(); outcome.patch = `${phase}.patch`; outcome.patchBytes = Buffer.byteLength(patch);
+          await writeFile(new URL(outcome.patch, run), patch, { flag: 'wx', mode: 0o600 });
+        }
       } catch (e) { outcome.patchFailure = errorText(e); }
     }
     outcome.elapsedMs = Math.round(performance.now() - started);
@@ -344,12 +360,12 @@ async function arm(phase, instruction) {
 }
 try {
   const sourceHashes = {};
-  for (const file of ['run.mjs', 'sketch.mjs', 'codex-accounting.mjs', 'sandbox.ts', 'tool-output.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, root)));
-  for (const file of await readdir(new URL('../../src/', root))) if (file.endsWith('.ts')) sourceHashes[`src/${file}`] = sha(await readFile(new URL(`../../src/${file}`, root)));
+  for (const file of ['run.mjs', 'sketch.mjs', 'codex-accounting.mjs', 'sandbox.ts', 'tool-output.ts', 'snapshot.py', '../contextbench.ts', 'grade.py', 'score.ts']) sourceHashes[file] = sha(await readFile(new URL(file, moduleRoot)));
+  for (const file of await readdir(new URL('../../src/', moduleRoot))) if (file.endsWith('.ts')) sourceHashes[`src/${file}`] = sha(await readFile(new URL(`../../src/${file}`, moduleRoot)));
   for (const file of ['package-lock.json']) {
-    sourceHashes[file] = sha(await readFile(new URL(`../../${file}`, root)));
+    sourceHashes[file] = sha(await readFile(new URL(`../../${file}`, moduleRoot)));
   }
-  const instruction = task.problemStatement;
+  const instruction = taskInstruction(task);
   await save('agent-task.json', task);
   await save('manifest.json', { version: 2, lifecycle: WORKING_POLICY, mode, instanceId: task.instanceId, base: task.baseCommit, image: task.image, piVersion: pkg.version,
     model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: arms, orders: { default: 'pi-native-compaction', clearing: 'capture-order-no-restoration', control: 'capture-order', selector: 'jev' }, bounds, capacity, target, ranking, decision,
