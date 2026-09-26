@@ -1,6 +1,6 @@
 # Paired native task runner
 
-`run.mjs` runs one task through Pi 0.87.1 and Sol 5.6 medium, once per arm. Live runs use four arms by default; `--arms=a,b` selects a subset in this order:
+`run.mjs` runs one task through Pi 0.87.1 and `gpt-6-sol` with medium reasoning, once per arm. Rounds before 2026-09-25 evening used `gpt-5.6-sol`; each manifest records its model. Live runs use four arms by default; `--arms=a,b` selects a subset in this order:
 
 - `default` runs unmodified Pi with native compaction and no manager.
 - `clearing` uses the `working-set-v1` packer and targets, clears the oldest evidence under pressure, and never restores. It makes no sketch or Jev calls.

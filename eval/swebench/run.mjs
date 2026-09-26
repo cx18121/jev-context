@@ -44,7 +44,8 @@ const sha = (data) => createHash('sha256').update(data).digest('hex');
 const pkg = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-coding-agent/package.json', moduleRoot)));
 assert.equal(pkg.version, '0.87.1');
 const catalog = JSON.parse(await readFile(new URL('../../node_modules/@earendil-works/pi-ai/dist/providers/data/openai-codex.json', moduleRoot)));
-const pinned = catalog['openai-codex-responses']['gpt-5.6-sol'];
+const CODING_MODEL = 'gpt-6-sol';
+const pinned = catalog['openai-codex-responses'][CODING_MODEL];
 const prices = pinned.cost;
 const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 // Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
@@ -125,15 +126,15 @@ async function setup() {
     baseUrl = `http://127.0.0.1:${server.address().port}`; judgeEndpoint = `${baseUrl}/judge`;
     runtime = await ModelRuntime.create({ ...options, credentials: new InMemoryCredentialStore() });
     const fakeKey = `fake.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-only' } })).toString('base64')}.fake`;
-    runtime.registerProvider('jev-pair-fixture', { baseUrl, api: 'openai-codex-responses', apiKey: fakeKey, models: [{ ...pinned, id: 'gpt-5.6-sol', baseUrl }, { ...pinnedSketch, id: 'gpt-6-luna', baseUrl }] });
-    model = runtime.getModel('jev-pair-fixture', 'gpt-5.6-sol');
+    runtime.registerProvider('jev-pair-fixture', { baseUrl, api: 'openai-codex-responses', apiKey: fakeKey, models: [{ ...pinned, id: CODING_MODEL, baseUrl }, { ...pinnedSketch, id: 'gpt-6-luna', baseUrl }] });
+    model = runtime.getModel('jev-pair-fixture', CODING_MODEL);
     sketchModel = runtime.getModel('jev-pair-fixture', 'gpt-6-luna');
   } else {
     // Read exactly the authorized judge key; never load the file into process.env or Docker.
     jevKey = parseEnv(await readFile(new URL('../../.env', moduleRoot), 'utf8')).TYPESAFE_API_KEY;
     assert.ok(jevKey?.trim(), 'Missing TYPESAFE_API_KEY');
     runtime = await ModelRuntime.create(options);
-    model = runtime.getModel('openai-codex', 'gpt-5.6-sol');
+    model = runtime.getModel('openai-codex', CODING_MODEL);
     sketchModel = runtime.getModel('openai-codex', 'gpt-6-luna');
     assert.ok(model && model.baseUrl === 'https://chatgpt.com/backend-api');
     baseUrl = model.baseUrl; judgeEndpoint = JEV_ENDPOINT;
@@ -368,7 +369,7 @@ try {
   const instruction = taskInstruction(task);
   await save('agent-task.json', task);
   await save('manifest.json', { version: 2, lifecycle: WORKING_POLICY, mode, instanceId: task.instanceId, base: task.baseCommit, image: task.image, piVersion: pkg.version,
-    model: 'openai-codex/gpt-5.6-sol', reasoning: 'medium', armOrder: arms, orders: { default: 'pi-native-compaction', clearing: 'capture-order-no-restoration', control: 'capture-order', selector: 'jev' }, bounds, capacity, target, ranking, decision,
+    model: `openai-codex/${CODING_MODEL}`, reasoning: 'medium', armOrder: arms, orders: { default: 'pi-native-compaction', clearing: 'capture-order-no-restoration', control: 'capture-order', selector: 'jev' }, bounds, capacity, target, ranking, decision,
     taskSha256: sha(JSON.stringify(task)), instructionSha256: sha(instruction), sourceHashes, prices, systemPrompt,
     sketch: { model: 'openai-codex/gpt-6-luna', reasoning: 'low', prices: pinnedSketch.cost,
       mode: live ? 'live' : 'scripted-http-real-sdk', outputTokenCapEnforced: false },
