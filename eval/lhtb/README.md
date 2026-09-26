@@ -20,6 +20,6 @@ uv run --no-project --python 3.13 python eval/lhtb/grade.py results/NEW_ROUND/ta
 
 - The agent works in `/app` with the task's CPU and memory limits and no network.
 - A command that exceeds 120 seconds returns exit 124 or 137 to the agent instead of ending the arm. The run deadline aborts the agent but keeps the container, so partial work can still be graded.
-- Each arm has 95 minutes and 400 coding requests, with a $22 soft catalog stop. The official LHTB harness uses a 90-minute budget per task.
+- Each arm has 95 minutes and 400 coding requests, with a $22 soft catalog stop. Responses may stream up to 16 MB, because a single file-writing tool call can exceed the SWE-bench 512 KB ceiling once SSE framing is included. The official LHTB harness uses a 90-minute budget per task.
 - The runner commits the final container as `jev-lhtb-final:*`. The grader copies the verifier into a fresh container from that image, reads `/logs/verifier/reward.txt`, and removes the image once graded. Verifier inputs never enter the agent's run.
-- There is no continue-until-timeout loop. When the agent stops, the arm ends, so scores are not comparable with the official leaderboard.
+- There is no continue-until-timeout loop. When the agent stops, the arm ends, so scores are not comparable with the official leaderboard. Tasks that set `continue_until_timeout = true` finish early under this runner; prefer the tasks that do not.

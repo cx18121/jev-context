@@ -51,7 +51,7 @@ const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 // Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
 // fixtures keep the small profile their scripted usage is built around.
 const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: 90000,
-  runMs: lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
+  runMs: lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: lhtb ? 16000000 : 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
   sketchRequests: live ? 150 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: live ? 256000 : 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
 const target = live ? { lowTokens: 32000, highTokens: 100000, restoreHeadroomTokens: 8000 }
