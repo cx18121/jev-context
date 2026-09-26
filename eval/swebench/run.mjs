@@ -21,12 +21,15 @@ import { guardedSketch, SKETCH_REQUEST_BYTES } from './sketch.mjs';
 process.umask(0o077);
 const [mode, taskFile, output, ...extra] = process.argv.slice(2);
 assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--local-compaction', '--live'].includes(mode)
-  && taskFile && output && extra.length <= 1 && extra.every((a) => a.startsWith('--arms=')), 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY [--arms=a,b]');
+  && taskFile && output && extra.length <= 2 && extra.every((a) => a.startsWith('--arms=') || a.startsWith('--minutes=')),
+  'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY [--arms=a,b] [--minutes=N]');
+const armsArg = extra.find((a) => a.startsWith('--arms='));
+const minutesArg = extra.find((a) => a.startsWith('--minutes='));
 const live = mode === '--live';
 // default: unmodified Pi with native compaction. clearing: threshold clearing, no restoration, sketch, or Jev.
 // control: capture order with earned restoration. selector: Jev ranking with earned restoration.
 const ARM_ORDER = ['default', 'clearing', 'control', 'selector'];
-const arms = extra.length ? extra[0].slice('--arms='.length).split(',') : live ? ARM_ORDER : ['control', 'selector'];
+const arms = armsArg ? armsArg.slice('--arms='.length).split(',') : live ? ARM_ORDER : ['control', 'selector'];
 assert.ok(arms.length > 0 && new Set(arms).size === arms.length && arms.every((a) => ARM_ORDER.includes(a))
   && arms.every((a, i) => i === 0 || ARM_ORDER.indexOf(arms[i - 1]) < ARM_ORDER.indexOf(a)), 'Arms must be distinct and in canonical order');
 const pairContract = arms.length === 2 && arms[0] === 'control' && arms[1] === 'selector';
@@ -36,7 +39,10 @@ const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const lhtb = task.kind === 'lhtb';
 const root = taskRoot(task);
 // LHTB arms run as separate processes, so each gets its own deadline and they can run in parallel.
-assert.ok(!lhtb || ((live || mode === '--local') && extra.length === 1 && arms.length === 1), 'LHTB runs are live or --local smoke, one explicit arm per process');
+assert.ok(!lhtb || ((live || mode === '--local') && armsArg && arms.length === 1), 'LHTB runs are live or --local smoke, one explicit arm per process');
+// A shorter deadline is for live canaries of the deadline path; it never extends the LHTB arm budget.
+const canaryMinutes = minutesArg ? Number(minutesArg.slice('--minutes='.length)) : null;
+assert.ok(canaryMinutes === null || (lhtb && Number.isInteger(canaryMinutes) && canaryMinutes >= 1 && canaryMinutes <= 95), '--minutes is an LHTB canary deadline from 1 to 95');
 const moduleRoot = new URL('./', import.meta.url);
 const run = pathToFileURL(resolve(output) + '/');
 await mkdir(run, { mode: 0o700 });
@@ -52,7 +58,7 @@ const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 // Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
 // fixtures keep the small profile their scripted usage is built around.
 const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: 90000,
-  runMs: lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: lhtb ? 16000000 : 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
+  runMs: canaryMinutes ? canaryMinutes * 60000 : lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: lhtb ? 16000000 : 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
   sketchRequests: live ? 150 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: live ? 256000 : 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
 const target = live ? { lowTokens: 32000, highTokens: 100000, restoreHeadroomTokens: 8000 }
