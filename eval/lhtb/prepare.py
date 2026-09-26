@@ -25,9 +25,12 @@ for name in args.tasks:
     subprocess.run(['docker', 'pull', '--platform=linux/amd64', tag], check=True, stdout=subprocess.DEVNULL)
     digest = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{index .RepoDigests 0}}', tag], text=True).strip()
     image = tag.rsplit(':', 1)[0] + '@' + digest.split('@')[1]
+    # Tasks differ (/app, /workspace); the agent must start where the image and instructions expect.
+    workdir = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Config.WorkingDir}}', tag], text=True).strip()
+    assert workdir.startswith('/') and workdir != '/', f'{name} has no usable WORKDIR'
     d = args.output / name; d.mkdir(parents=True)
     agent = {'kind': 'lhtb', 'instanceId': f'lhtb__{name}', 'image': image, 'instruction': (task_dir / 'instruction.md').read_text(),
-             'workdir': '/app', 'cpus': int(env.get('cpus', 2)), 'memoryMb': int(env.get('memory_mb', 4096))}
+             'workdir': workdir, 'cpus': int(env.get('cpus', 2)), 'memoryMb': int(env.get('memory_mb', 4096))}
     (d / 'agent.json').open('x').write(json.dumps(agent, indent=2) + '\n')
     shutil.copytree(task_dir / 'tests', d / 'evaluator-tests')
     if (task_dir / 'solution').is_dir(): shutil.copytree(task_dir / 'solution', d / 'evaluator-solution')

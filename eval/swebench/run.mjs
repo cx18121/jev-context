@@ -202,9 +202,13 @@ async function arm(phase, instruction) {
     await sandbox.start();
     outcome.configuration = sandbox.configuration;
     if (lhtb && !live && !fixturePaths) {
-      const found = await sandbox.command("find . -name '*.py' -size +2k -not -path '*/.*' | sort | head -2", { seconds: 30 });
+      const found = await sandbox.command("find . -type f -size +1k -size -512k -not -path '*/.*' \\( -name '*.py' -o -name '*.md' -o -name '*.txt' \\) | sort | head -2", { seconds: 30 });
       fixturePaths = found.text.trim().split('\n').filter(Boolean).map((path) => path.replace(/^\.\//, ''));
-      assert.equal(fixturePaths.length, 2, 'Local fixture needs two source files');
+      // Some tasks start with an empty workspace. The scripted fixture then reads two files it writes itself.
+      if (fixturePaths.length < 2) {
+        await sandbox.command("for f in fixture_a.txt fixture_b.txt; do seq 1 800 | sed 's/^/scripted fixture line /' > $f; done", { seconds: 30 });
+        fixturePaths = ['fixture_a.txt', 'fixture_b.txt'];
+      }
     }
     if (!lhtb && !sourceSnapshot) {
       const snapshot = await sandbox.snapshot();
