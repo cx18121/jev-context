@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { CapacityMeasurement } from '../src/budget.ts';
 import { packWorkingSet, underPressure, type Priority, type WorkingSetItem } from '../src/working-set.ts';
 
-const target = { highTokens: 100, lowTokens: 80 };
+const target = { highTokens: 100, lowTokens: 80, restoreHeadroomTokens: 0 };
 function fixture(spec: Array<[string, boolean, number, number, number?]>, floorTokens = 20, floorBytes = 40, wireLimit = 10000) {
   const items: WorkingSetItem[] = spec.map(([id, resident], capturedAt) => ({ id, resident, capturedAt }));
   const scores: Record<string, Priority> = Object.fromEntries(spec.map(([id, , , level, score]) => [id, { level, score: score ?? level }]));
@@ -96,6 +96,25 @@ test('restore-only requires no resident scores, never displaces, and fills only 
   assert.equal(busy.targetMiss, true);
 });
 
+test('rebalancing leaves restoration headroom that a later restore-only decision can use', () => {
+  const withHeadroom = { ...target, restoreHeadroomTokens: 20 };
+  const residents: Array<[string, boolean, number, number]> = [['a', true, 30, 4], ['b', true, 25, 3], ['c', true, 20, 1]];
+  const f = fixture(residents);
+  const tight = packWorkingSet(f.items, target, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure);
+  const roomy = packWorkingSet(f.items, withHeadroom, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure);
+  assert.deepEqual([tight.visibleIds, tight.after.totalTokens], [['a', 'b'], 75]);
+  assert.deepEqual([roomy.visibleIds, roomy.after.totalTokens, roomy.targetTokens, roomy.targetMiss], [['a'], 50, 60, false]);
+  // Restoration still fills to the low mark. Only the headroom state has room, and the better retired item returns first.
+  const restore = (visible: string[]) => {
+    const next = fixture([...residents.map(([id, , size, level]): [string, boolean, number, number] => [id, visible.includes(id), size, level]),
+      ['x', false, 20, 2]]);
+    return packWorkingSet(next.items, withHeadroom, 'restore-only', { kind: 'jev', priorities: next.scores }, next.measure).restoredIds;
+  };
+  assert.deepEqual(restore(tight.visibleIds), []);
+  assert.deepEqual(restore(roomy.visibleIds), ['b']);
+  assert.throws(() => packWorkingSet(f.items, { ...target, restoreHeadroomTokens: 80 }, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure));
+});
+
 test('a floor above the working target is a target miss, not a hard capacity stop', () => {
   const result = fixture([['old', true, 20, 4]], 110).pack();
   assert.equal(result.outcome, 'selected');
@@ -137,7 +156,7 @@ test('incomplete, foreign, duplicate and invalid rankings fail rather than treat
     assert.throws(() => packWorkingSet(f.items, target, 'rebalance', { kind: 'jev', priorities: scores }, f.measure), /Invalid or incomplete/);
   }
   assert.throws(() => packWorkingSet([...f.items, f.items[0]!], target, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure), /Invalid or incomplete/);
-  for (const bad of [{ highTokens: 100, lowTokens: 100 }, { highTokens: 201, lowTokens: 80 }, { highTokens: 100, lowTokens: 0 }]) {
+  for (const bad of [{ highTokens: 100, lowTokens: 100, restoreHeadroomTokens: 0 }, { highTokens: 201, lowTokens: 80, restoreHeadroomTokens: 0 }, { highTokens: 100, lowTokens: 0, restoreHeadroomTokens: 0 }]) {
     assert.throws(() => packWorkingSet(f.items, bad, 'rebalance', { kind: 'jev', priorities: f.scores }, f.measure), /Working-set targets/);
   }
 });

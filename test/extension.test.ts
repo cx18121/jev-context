@@ -25,7 +25,7 @@ function pressureSeed(manager: SessionManager) {
   return oldId!;
 }
 function pressureOptions(model: Parameters<typeof captureOptions>[0]) {
-  return { ...captureOptions(model), target: { lowTokens: 4000, highTokens: 6000 } };
+  return { ...captureOptions(model), target: { lowTokens: 4000, highTokens: 6000, restoreHeadroomTokens: 0 } };
 }
 
 test('automatic working-set edits preserve disk originals and unchanged wire prefixes', async () => {
@@ -178,7 +178,7 @@ test('inadmissible floor sends no HTTP request and commits no edits', async () =
     seedHistory(manager);
     const options = captureOptions(fixture.model);
     options.capacity.contextLimit = 1024;
-    options.target = { lowTokens: 512, highTokens: 768 };
+    options.target = { lowTokens: 512, highTokens: 768, restoreHeadroomTokens: 0 };
     const { session, errors } = await fixture.session((manager) => [createWorkingContextExtension(manager, options)], manager);
     await session.prompt('Protected request cannot fit.');
     assert.equal(fixture.requests.length, 0);

@@ -29,7 +29,7 @@ async function fixture() {
   let sketches = 0;
   const options: WorkingContextOptions = {
     capacity: { contextLimit: 30000, marginTokens: 100, maxRequestBytes: 300000 },
-    target: { lowTokens: 7000, highTokens: 9000 }, archiveLimit: 2, decisionTimeoutMs: 30000,
+    target: { lowTokens: 7000, highTokens: 9000, restoreHeadroomTokens: 0 }, archiveLimit: 2, decisionTimeoutMs: 30000,
     order: { kind: 'jev', connection: judge.config },
     ranking: { maxPairBytes: 16000, maxRequestBytes: 40000, maxRequests: 8, maxSegments: 100,
       maxInputBytes: 500000, maxCostUsd: 1, requestTimeoutMs: judge.config.timeoutMs, maxDurationMs: 20000 },
@@ -290,7 +290,7 @@ for (const kind of ['capacity-stop', 'transport-stop', 'selection-incomplete'] a
       seed(manager, false, 20000);
       if (kind === 'capacity-stop') {
         f.options.capacity.contextLimit = 1500;
-        f.options.target = { lowTokens: 800, highTokens: 1200 };
+        f.options.target = { lowTokens: 800, highTokens: 1200, restoreHeadroomTokens: 0 };
       } else if (kind === 'transport-stop') f.options.capacity.maxRequestBytes = 1;
       else { f.options.capacity.maxRequestBytes = 15000; f.options.ranking.maxSegments = 1; }
       const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
@@ -330,8 +330,8 @@ for (const mode of ['no-room', 'no-whole-fit', 'restore'] as const) {
       const { old } = seed(manager, true, mode === 'no-whole-fit' ? 20000 : 6000);
       const userId = manager.getBranch().findLast((entry) => entry.type === 'message' && entry.message.role === 'user')!.id;
       commitSelection(manager, [old], WORKING_POLICY, { events: { userId, focusHash: 'previous' } });
-      if (mode === 'no-room') f.options.target = { lowTokens: 2000, highTokens: 15000 };
-      if (mode === 'no-whole-fit') f.options.target = { lowTokens: 10000, highTokens: 20000 };
+      if (mode === 'no-room') f.options.target = { lowTokens: 2000, highTokens: 15000, restoreHeadroomTokens: 0 };
+      if (mode === 'no-whole-fit') f.options.target = { lowTokens: 10000, highTokens: 20000, restoreHeadroomTokens: 0 };
       const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
       await run.session.agent.continue();
       assert.equal(f.pi.requests.length, 1);
@@ -359,7 +359,7 @@ for (const mode of ['no-room', 'no-whole-fit', 'restore'] as const) {
 test('pressure with only pinned content above the low mark records target miss without inference', async () => {
   const f = await fixture();
   try {
-    f.options.target = { lowTokens: 1000, highTokens: 1100 };
+    f.options.target = { lowTokens: 1000, highTokens: 1100, restoreHeadroomTokens: 0 };
     const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)]);
     await run.session.prompt('Fix the API.');
     assert.equal(f.pi.requests.length, 1);

@@ -6,7 +6,7 @@ The experiment asks whether Jev can choose more useful evidence than a newest-fi
 
 ## How it works
 
-When context exceeds a configured high-water mark, the manager packs whole tool results toward a lower target. The newest complete tool exchange, incomplete exchanges, and conversation messages stay protected. A bounded task sketch and archive lookup help it reconsider older evidence as the task changes.
+When context exceeds a configured high-water mark, the manager packs whole tool results below a lower target, leaving room for retired results to return. The newest complete tool exchange, incomplete exchanges, and conversation messages stay protected. A bounded task sketch and archive lookup help it reconsider older evidence as the task changes.
 
 Two modes share the same packer and lifecycle:
 

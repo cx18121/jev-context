@@ -112,7 +112,7 @@ test('a capacity stop is not a captured request or a scored zero', async () => {
   try {
     const options = captureOptions(fixture.model);
     options.capacity.contextLimit = 1024;
-    options.target = { lowTokens: 512, highTokens: 768 };
+    options.target = { lowTokens: 512, highTokens: 768, restoreHeadroomTokens: 0 };
     const { session, manager, errors } = await fixture.session((manager) => [createWorkingContextExtension(manager, options)]);
     await session.prompt('Cannot dispatch within this budget.');
     assert.equal(received, 0);

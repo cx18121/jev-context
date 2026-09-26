@@ -39,7 +39,7 @@ const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : 24, judgeR
   runMs: 2400000, toolSeconds: 120, requestBytes: 180000, responseBytes: 512000, catalogStopUsd: 3,
   sketchRequests: 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
-const target = { lowTokens: 20000, highTokens: 24576 };
+const target = { lowTokens: 20000, highTokens: 24576, restoreHeadroomTokens: 4000 };
 const ranking = { maxPairBytes: 30000, maxRequestBytes: 60000, maxRequests: 8, maxSegments: 256,
   maxInputBytes: 480000, maxCostUsd: 0.1, requestTimeoutMs: 15000, maxDurationMs: 120000 };
 const decision = { archiveLimit: 4, decisionTimeoutMs: 180000, sketchMaxUpdates: 4 };

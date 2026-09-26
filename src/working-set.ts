@@ -1,8 +1,13 @@
 import type { CapacityMeasurement } from './budget.ts';
 
+/**
+ * Pressure above `highTokens` rebalances to `lowTokens - restoreHeadroomTokens`. Restoration may
+ * fill up to `lowTokens`, so the headroom is the space rebalancing leaves for evidence to return.
+ */
 export interface WorkingSetTarget {
   highTokens: number;
   lowTokens: number;
+  restoreHeadroomTokens: number;
 }
 
 /** Levels are ordinal. Expected score only breaks ties within a median level. */
@@ -44,8 +49,10 @@ function compare(a: RankedItem, b: RankedItem) {
 
 export function validateWorkingSetTarget(target: WorkingSetTarget, contextLimit: number) {
   if (!Number.isSafeInteger(target.lowTokens) || !Number.isSafeInteger(target.highTokens) ||
+      !Number.isSafeInteger(target.restoreHeadroomTokens) || target.restoreHeadroomTokens < 0 ||
+      target.restoreHeadroomTokens >= target.lowTokens ||
       target.lowTokens <= 0 || target.lowTokens >= target.highTokens || target.highTokens > contextLimit) {
-    throw new Error('Working-set targets require 0 < lowTokens < highTokens <= provider token allowance');
+    throw new Error('Working-set targets require 0 <= restoreHeadroomTokens < lowTokens < highTokens <= provider token allowance');
   }
 }
 
@@ -90,7 +97,7 @@ export function packWorkingSet(
   const before = measure(residents.map((item) => item.id));
   const floor = measure([]);
   validateWorkingSetTarget(target, before.contextLimit);
-  const targetTokens = Math.max(target.lowTokens, floor.totalTokens);
+  const targetTokens = Math.max(mode === 'rebalance' ? target.lowTokens - target.restoreHeadroomTokens : target.lowTokens, floor.totalTokens);
   const floorDominated = floor.totalTokens > target.lowTokens;
   const fits = (value: CapacityMeasurement) => value.admitted && value.totalTokens <= targetTokens;
   const finish = (outcome: WorkingSetSelection['outcome'], selected: Set<string>, after: CapacityMeasurement,

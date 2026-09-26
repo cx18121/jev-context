@@ -76,7 +76,7 @@ export async function runScriptedPi(options: {
     if (!model) throw new Error('Missing scripted model');
     const settings = SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const capacity = { contextLimit: mode === 'budget-stop' ? 1024 : 32768, marginTokens: 1024, maxRequestBytes: 300000 };
-    const target = mode === 'budget-stop' ? { lowTokens: 512, highTokens: 768 } : { lowTokens: 20000, highTokens: 24576 };
+    const target = mode === 'budget-stop' ? { lowTokens: 512, highTokens: 768, restoreHeadroomTokens: 0 } : { lowTokens: 20000, highTokens: 24576, restoreHeadroomTokens: 0 };
     manager = SessionManager.create(workspace, join(artifacts, 'sessions'));
     const loader = new DefaultResourceLoader({
       cwd: workspace, agentDir, settingsManager: settings,

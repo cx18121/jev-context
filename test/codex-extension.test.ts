@@ -96,7 +96,7 @@ test('Codex pressure ranks complete eligible evidence, preserves pins and defers
         }])) } }));
       let originalPayload: unknown;
       const options = captureOptions(f.model);
-      options.target = { lowTokens: 4000, highTokens: 6000 };
+      options.target = { lowTokens: 4000, highTokens: 6000, restoreHeadroomTokens: 0 };
       options.order = { kind: 'jev', connection: judge.config };
       options.ranking.requestTimeoutMs = judge.config.timeoutMs;
       const run = await f.session((m) => [
@@ -176,7 +176,7 @@ test('Codex capacity, provenance and provider-map failures stop before HTTP disp
       if (failure === 'missing-reserve') delete options.capacity.outputReserveTokens;
       if (failure === 'budget') {
         options.capacity.contextLimit = 1024;
-        options.target = { lowTokens: 512, highTokens: 768 };
+        options.target = { lowTokens: 512, highTokens: 768, restoreHeadroomTokens: 0 };
       }
       const { session } = await f.session((m) => [corrupt, createWorkingContextExtension(m, options)], manager);
       await session.prompt('Continue.');

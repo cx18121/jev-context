@@ -43,7 +43,7 @@ test('the complete replacement edits only selected tool bodies and round-trips t
   const original = structuredClone(first.payload), branch = structuredClone(f.manager.getBranch());
   assert.deepEqual(first.plan.candidates.map((item) => item.id), [f.a, f.b]);
   const lowTokens = first.plan.floor.totalTokens + 1100;
-  const target = { lowTokens, highTokens: lowTokens + 500 };
+  const target = { lowTokens, highTokens: lowTokens + 500, restoreHeadroomTokens: 0 };
   const selected = first.plan.select(target, 'rebalance', { kind: 'jev', priorities: { [f.a]: { level: 4, score: 4 }, [f.b]: { level: 1, score: 1 } } });
   assert.equal(selected.selection.outcome, 'selected');
   assert.deepEqual(selected.retiredIds, [f.b]);
@@ -74,7 +74,7 @@ test('capture-order uses the same native view and preserves pins when newer arch
   const f = fixture();
   commitSelection(f.manager, [f.b], 'working-set-v1');
   const { plan, payload } = f.prepare([f.b]);
-  const target = { lowTokens: plan.floor.totalTokens + 1100, highTokens: plan.floor.totalTokens + 1600 };
+  const target = { lowTokens: plan.floor.totalTokens + 1100, highTokens: plan.floor.totalTokens + 1600, restoreHeadroomTokens: 0 };
   assert.deepEqual(plan.candidates.map((item) => item.id), [f.a, f.b]);
   const selected = plan.select(target, 'rebalance', { kind: 'capture-order' });
   assert.deepEqual(selected.selection.restoredIds, [f.b]);
@@ -90,7 +90,7 @@ test('unshortlisted archives remain stubbed, while tool-only restoration does no
   commitSelection(f.manager, [f.a, f.b], 'working-set-v1');
   const { plan } = f.prepare([f.a]);
   assert.deepEqual(plan.candidates.map((item) => item.id), [f.a]);
-  const selected = plan.select({ lowTokens: 8000, highTokens: 9000 }, 'restore-only', { kind: 'jev', priorities: { [f.a]: { level: 3, score: 3 } } });
+  const selected = plan.select({ lowTokens: 8000, highTokens: 9000, restoreHeadroomTokens: 0 }, 'restore-only', { kind: 'jev', priorities: { [f.a]: { level: 3, score: 3 } } });
   assert.deepEqual(selected.retiredIds, [f.b]);
   assert.deepEqual(selected.selection.displacedIds, []);
 });
@@ -98,7 +98,7 @@ test('unshortlisted archives remain stubbed, while tool-only restoration does no
 test('a pinned floor stop returns the original request and cannot install partial retirements', () => {
   const f = fixture(), { payload, messages, history } = f.prepare();
   const plan = prepareWorkingSetView(payload, messages, history, model, { ...limits, maxRequestBytes: 1 }, []);
-  const result = plan.select({ lowTokens: 8000, highTokens: 9000 }, 'rebalance', { kind: 'jev', priorities: { [f.a]: { level: 0, score: 0 }, [f.b]: { level: 0, score: 0 } } });
+  const result = plan.select({ lowTokens: 8000, highTokens: 9000, restoreHeadroomTokens: 0 }, 'rebalance', { kind: 'jev', priorities: { [f.a]: { level: 0, score: 0 }, [f.b]: { level: 0, score: 0 } } });
   assert.equal(result.selection.outcome, 'capacity-stop');
   assert.deepEqual(result.payload, payload);
   assert.deepEqual(result.retiredIds, []);
@@ -109,8 +109,8 @@ test('restore-only preflight rejects whole archives that cannot fit without evic
   commitSelection(f.manager, [f.b], 'working-set-v1');
   const { plan } = f.prepare([f.b]);
   const lowTokens = plan.before.totalTokens + 1;
-  assert.deepEqual(plan.restorableIds({ lowTokens, highTokens: lowTokens + 100 }), []);
-  assert.deepEqual(plan.restorableIds({ lowTokens: 8000, highTokens: 9000 }), [f.b]);
+  assert.deepEqual(plan.restorableIds({ lowTokens, highTokens: lowTokens + 100, restoreHeadroomTokens: 0 }), []);
+  assert.deepEqual(plan.restorableIds({ lowTokens: 8000, highTokens: 9000, restoreHeadroomTokens: 0 }), [f.b]);
 });
 
 test('local planning checks its cancellation/deadline guard between trial measurements', () => {
@@ -119,7 +119,7 @@ test('local planning checks its cancellation/deadline guard between trial measur
   const plan = prepareWorkingSetView(payload, messages, history, model, limits, [], undefined, () => {
     if (++checks === 9) throw new Error('local deadline');
   });
-  assert.throws(() => plan.select({ lowTokens: 1500, highTokens: 2000 }, 'rebalance', { kind: 'jev', priorities: {
+  assert.throws(() => plan.select({ lowTokens: 1500, highTokens: 2000, restoreHeadroomTokens: 0 }, 'rebalance', { kind: 'jev', priorities: {
     [f.a]: { level: 2, score: 2 }, [f.b]: { level: 1, score: 1 },
   } }), /local deadline/);
   assert.equal(checks, 9);
@@ -149,7 +149,7 @@ test('interrupted-call placeholders stay in the floor without becoming stored ev
     const view = prepare(items);
     assert.equal(view.candidates.length, 0);
     assert.deepEqual(view.floor, view.before);
-    assert.deepEqual(view.select({ lowTokens: 1000, highTokens: 2000 }, 'rebalance', { kind: 'capture-order' }).payload, payload(items));
+    assert.deepEqual(view.select({ lowTokens: 1000, highTokens: 2000, restoreHeadroomTokens: 0 }, 'rebalance', { kind: 'capture-order' }).payload, payload(items));
     assert.equal(history.evidence.length, 1);
     for (const invalid of [items.slice(0, 1), [...items, items[1]!], [items[0]!, output('pending', 'changed')]]) {
       assert.throws(() => prepare(invalid), /Invalid provider placeholder/);

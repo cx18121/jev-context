@@ -26,7 +26,7 @@ The current policy is `working-set-v1`, with either Jev ranking or a newest-firs
 `WorkingContextOptions` requires:
 
 - `capacity` with a token context limit, token margin, and serialized request-byte ceiling. Codex also needs an explicit output-token reserve.
-- `target` with `0 < lowTokens < highTokens <= effective context limit`. Both targets include output reserve and margin.
+- `target` with `0 <= restoreHeadroomTokens < lowTokens < highTokens <= effective context limit`. Rebalancing packs to `lowTokens - restoreHeadroomTokens`, and restoration may fill up to `lowTokens`. The headroom is the room left for evidence to return between rebalances. All targets include output reserve and margin.
 - `order` as `{ kind: 'jev', connection }` or `{ kind: 'capture-order' }`.
 - `ranking` limits for a state/question pair, serialized request, batch count, segment count, aggregate input, estimated cost, per-request timeout, and total duration.
 - `sketch` with an explicit priced model, output limit, timeout, and maximum catch-up updates. An optional `complete` callback provides the transport.
@@ -93,7 +93,7 @@ The context hook validates the projected branch. The provider hook sees the fina
 5. Plan complete resident ranking and whole optional archive admission before dispatching Jev batches.
 6. Pack and remeasure the result. Recheck the branch and deadline, commit synchronously, and return the selected payload.
 
-Pressure means exceeding the high target or failing admission. Pressure and a new user/custom message with an archive trigger rebalancing toward the low target. A changed newest-exchange tool focus with an archive triggers restoration only. Restoration-only decisions never evict residents and skip inference when there is no room or no fitting item on the retrieved page. Fitting turns without those triggers send the recorded view without sketch or Jev calls.
+Pressure means exceeding the high target or failing admission. Pressure and a new user/custom message with an archive trigger rebalancing toward the low target minus the restoration headroom. A changed newest-exchange tool focus with an archive triggers restoration only, up to the low target. With zero headroom, rebalancing usually leaves no room for restoration. Restoration-only decisions never evict residents and skip inference when there is no room or no fitting item on the retrieved page. Fitting turns without those triggers send the recorded view without sketch or Jev calls.
 
 Custom extension messages currently count as corrections. An extension that injects one every turn can therefore cause repeated decisions. This remains a normal-stack compatibility limitation.
 
