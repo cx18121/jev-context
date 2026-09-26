@@ -7,6 +7,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('source', type=Path, help='LHTB checkout at a pinned commit')
 parser.add_argument('output', type=Path, help='New round directory')
 parser.add_argument('tasks', nargs='+')
+parser.add_argument('--arm-minutes', type=float, default=95, help='Arm deadline; tasks paced longer than this are rejected')
 args = parser.parse_args()
 commit = subprocess.check_output(['git', '-C', str(args.source), 'rev-parse', 'HEAD'], text=True).strip()
 items = []
@@ -14,7 +15,12 @@ for name in args.tasks:
     task_dir = args.source / 'tasks' / name
     config = tomllib.loads((task_dir / 'task.toml').read_text())
     env = config['environment']
+    # The runner has no network, no GPU and no continue-until-timeout loop. Reject tasks that need them,
+    # and tasks whose own pacing estimate exceeds the arm deadline.
     assert not env.get('allow_internet') and not env.get('gpus'), f'{name} needs network or GPU'
+    assert not config.get('agent', {}).get('continue_until_timeout', False), f'{name} relies on continue-until-timeout'
+    paced = config.get('metadata', {}).get('estimated_duration_sec')
+    assert paced is None or paced <= args.arm_minutes * 60, f'{name} is paced to {paced}s, longer than the arm'
     tag = env['docker_image']
     subprocess.run(['docker', 'pull', '--platform=linux/amd64', tag], check=True, stdout=subprocess.DEVNULL)
     digest = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{index .RepoDigests 0}}', tag], text=True).strip()

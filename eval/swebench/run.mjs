@@ -338,6 +338,13 @@ async function arm(phase, instruction) {
     outcome.completed = !outcome.failure && !fatal && !outcome.stops.length && report.accountingComplete && last?.stopReason === 'stop';
     outcome.failure ??= fatal ?? outcome.stops.at(-1)?.reason ?? (outcome.completed ? null : 'No accounted final response');
     outcome.codingCatalogCostUsd = outcome.requests.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0);
+    // Whether the arm ever crossed the eviction trigger decides whether it tested management at all.
+    outcome.peakInputTokens = Math.max(0, ...outcome.requests.map((r) => r.usage?.input ?? 0));
+    // Managed arms evict before sending, so their reported input stays low; count evictions instead.
+    outcome.evictions = outcome.selections.filter((d) => d.reconsideration?.mode === 'rebalance' && d.reconsideration.selection?.displacedIds?.length).length;
+    outcome.crossedHighMark = outcome.peakInputTokens > target.highTokens || outcome.evictions > 0;
+    outcome.cachedInputShare = (() => { const u = outcome.requests.filter((r) => r.usage);
+      const input = u.reduce((n, r) => n + r.usage.input, 0); return input ? u.reduce((n, r) => n + r.usage.cached, 0) / input : null; })();
     outcome.rankingKnownCostUsd = outcome.rankingResults.reduce((n, r) => n + (r.pricedCostUsd ?? 0), 0);
     outcome.rankingMs = outcome.rankingResults.reduce((n, r) => n + r.latencyMs, 0);
     await save(`${phase}-branch.json`, entries);
