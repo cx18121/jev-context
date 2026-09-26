@@ -101,6 +101,33 @@ function checkpoint(branch: SessionEntry[]): Checkpoint | undefined {
   return value;
 }
 
+/**
+ * Restoration must be earned. Jev archives return only above their level when last displaced by a
+ * rebalance. The capture-order control cannot judge standing, so it holds back the latest rebalance's
+ * displacements instead.
+ */
+function retirements(branch: SessionEntry[]) {
+  const levels = new Map<string, number>();
+  let latest: string[] = [];
+  for (const entry of branch) {
+    if (entry.type !== 'custom' || entry.customType !== SELECTION_ENTRY || (entry.data as { policy?: unknown })?.policy !== WORKING_POLICY) continue;
+    const decision = (entry.data as { reconsideration?: { mode?: unknown; selection?: { displacedIds?: unknown }; retiredLevels?: unknown } }).reconsideration;
+    if (decision?.mode !== 'rebalance' || !decision.selection) continue;
+    const displaced = decision.selection.displacedIds, recorded = decision.retiredLevels ?? {};
+    if (!Array.isArray(displaced) || displaced.some((id) => typeof id !== 'string') || typeof recorded !== 'object' || recorded === null) {
+      throw new Error('Invalid working-set retirement record');
+    }
+    latest = displaced;
+    for (const id of displaced) {
+      const level = (recorded as Record<string, unknown>)[id];
+      if (level === undefined) { levels.delete(id); continue; }
+      if (!Number.isInteger(level) || (level as number) < 0 || (level as number) > 4) throw new Error('Invalid working-set retirement record');
+      levels.set(id, level as number);
+    }
+  }
+  return { levels, latest: new Set(latest) };
+}
+
 function activity(history: HistoryView) {
   const latest = new Set(history.newestExchangeIds);
   const full = JSON.stringify(history.evidence.filter((item) => latest.has(item.id)).map((item) => ({
@@ -265,7 +292,10 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
         const query = `${sketch?.summary ?? oldSummary}\n${recent.text}`;
         const lookup = exploreArchive(history, query, options.archiveLimit, prior?.archiveCursor);
         view = prepare(lookup.candidates.map((item) => item.evidence.id));
-        const fitting = mode === 'restore-only' ? new Set(view.restorableIds(options.target)) : null;
+        const retired = retirements(manager.getBranch());
+        // Level 4 cannot be exceeded, so those archives are held back without paying for a judgment.
+        const unearned = (id: string) => options.order.kind === 'jev' ? retired.levels.get(id) === 4 : retired.latest.has(id);
+        const fitting = mode === 'restore-only' ? new Set(view.restorableIds(options.target).filter((id) => !unearned(id))) : null;
         const filteredIds = lookup.pageIds.filter((id) => fitting && !fitting.has(id));
         const retrieval = { version: lookup.version, queryTerms: lookup.queryTerms, poolSize: lookup.poolSize, matchedCount: lookup.matchedCount,
           pageIds: lookup.pageIds, wrapped: lookup.wrapped, resetReason: lookup.resetReason, filteredIds };
@@ -288,6 +318,7 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
         check();
         if (plan.outcome !== 'ready') throw new IncompleteSelection('Mandatory ranking exceeds decision limits');
         let order: WorkingSetOrder = { kind: 'capture-order' };
+        let heldBackIds: string[] = [];
         if (options.order.kind === 'jev') {
           const connection = options.order.connection;
           const rejectedHashes = new Set(manager.getBranch().flatMap((entry) => {
@@ -314,15 +345,22 @@ export function createWorkingContextExtension(manager: SessionManager, options: 
           }
           const scores = collectRanking(plan, completed);
           if (!scores) throw new IncompleteSelection('Ranking is incomplete');
+          if (mode === 'restore-only') {
+            heldBackIds = archives.filter((item) => scores[item.id] && retired.levels.has(item.id) &&
+              scores[item.id]!.level <= retired.levels.get(item.id)!).map((item) => item.id);
+            for (const id of heldBackIds) delete scores[id];
+          }
           order = { kind: 'jev', priorities: scores };
         }
-        view = prepare(archives.filter((item) => plan.candidateIds.includes(item.id)).map((item) => item.id));
+        view = prepare(archives.filter((item) => plan.candidateIds.includes(item.id) && !heldBackIds.includes(item.id)).map((item) => item.id));
         const selected = view.select(options.target, mode, order);
         check();
         if (selected.selection.outcome !== 'selected') throw new IncompleteSelection('Working-set packing is incomplete');
         current.measured = selected.selection.after;
+        const levels = order.kind === 'jev' ? order.priorities : null;
         commit(ctx, current, selected.retiredIds, { events: { ...events, archiveCursor: lookup.nextCursor }, mode,
-          retrieval: { ...retrieval, omittedIds: plan.omittedArchiveIds },
+          ...(mode === 'rebalance' && levels && { retiredLevels: Object.fromEntries(selected.selection.displacedIds.map((id) => [id, levels[id]!.level])) }),
+          retrieval: { ...retrieval, omittedIds: plan.omittedArchiveIds, heldBackIds },
           ranking: { candidateIds: plan.candidateIds, inputByteReservation: plan.inputByteReservation, costReservationUsd: plan.costReservationUsd },
           selection: selected.selection });
         return send(selected.payload);

@@ -356,6 +356,38 @@ for (const mode of ['no-room', 'no-whole-fit', 'restore'] as const) {
   });
 }
 
+for (const [kind, recorded, judged, restored] of [
+  ['jev', 3, 3, false], ['jev', 3, 4, true], ['jev', 4, 4, false],
+  ['capture-order', 'latest', 0, false], ['capture-order', 'earlier', 0, true],
+] as const) {
+  test(`${kind} restoration must be earned (${recorded} -> ${judged})`, async () => {
+    const f = await fixture();
+    try {
+      if (kind === 'capture-order') f.options.order = { kind };
+      const manager = SessionManager.inMemory(f.pi.directory);
+      const { old } = seed(manager, true);
+      const userId = manager.getBranch().findLast((entry) => entry.type === 'message' && entry.message.role === 'user')!.id;
+      const events = { userId, focusHash: 'previous' };
+      if (kind === 'jev') {
+        commitSelection(manager, [old], WORKING_POLICY, { events, mode: 'rebalance', selection: { displacedIds: [old] }, retiredLevels: { [old]: recorded } });
+      } else {
+        commitSelection(manager, [old], WORKING_POLICY, { events, mode: 'rebalance', selection: { displacedIds: [old] } });
+        if (recorded === 'earlier') commitSelection(manager, [old], WORKING_POLICY, { events, mode: 'rebalance', selection: { displacedIds: [] } });
+      }
+      f.judge.respond((request) => ({ body: scoreResponse(request, () => judged) }));
+      const run = await f.pi.session((m) => [createWorkingContextExtension(m, f.options)], manager);
+      await run.session.agent.continue();
+      assert.equal(f.pi.requests.length, 1);
+      assert.deepEqual(history(manager).retiredIds, restored ? [] : [old]);
+      const last = JSON.stringify(entries(manager, SELECTION_ENTRY).at(-1)!.data);
+      // A level-4 retirement cannot be exceeded, and the control never judges, so neither pays Jev.
+      assert.equal(f.judge.requests.length > 0, kind === 'jev' && recorded !== 4);
+      if (!restored && kind === 'jev' && recorded === 3) assert.match(last, new RegExp(`"heldBackIds":\\["${old}"\\]`));
+      assert.deepEqual(run.errors, []);
+    } finally { await f.close(); }
+  });
+}
+
 test('pressure with only pinned content above the low mark records target miss without inference', async () => {
   const f = await fixture();
   try {

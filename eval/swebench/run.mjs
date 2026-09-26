@@ -371,7 +371,11 @@ try {
       const selected = JSON.parse(await readFile(new URL(`${outcome.phase}-captures.json`, run)));
       assert.ok(selected.some((c) => c.evidence.some((e) => e.visible && e.mapping.span)), 'Real reads must map to source');
       const retired = selected.flatMap((c) => c.evidence.filter((e) => !e.visible && e.mapping.span).map((e) => e.id));
-      assert.ok(retired.length > 0 && selected.at(-1).evidence.some((e) => e.visible && retired.includes(e.id)), 'Mapped read must retire and restore without rereading');
+      assert.ok(retired.length > 0, 'Mapped read must retire');
+      const restored = selected.at(-1).evidence.some((e) => e.visible && retired.includes(e.id));
+      // Jev's scripted level rises from 1 to 4, so the read earns restoration without rereading. The
+      // control cannot judge standing and must not restore what its only rebalance just retired.
+      assert.equal(restored, outcome.phase === 'selector', 'Only earned restoration returns a retired read');
     }
     assert.equal(await readFile(new URL('control.patch', run), 'utf8'), await readFile(new URL('selector.patch', run), 'utf8'));
   } else if (mode === '--local-invalid-usage') {
