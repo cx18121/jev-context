@@ -57,7 +57,7 @@ const prices = pinned.cost;
 const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 // Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
 // fixtures keep the small profile their scripted usage is built around.
-const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: 90000,
+const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: lhtb ? 300000 : 90000,
   runMs: canaryMinutes ? canaryMinutes * 60000 : lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: lhtb ? 16000000 : 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
   sketchRequests: live ? 150 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: live ? 256000 : 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
@@ -67,6 +67,10 @@ const target = live ? { lowTokens: 32000, highTokens: 100000, restoreHeadroomTok
 const ranking = { maxPairBytes: 30000, maxRequestBytes: live ? 120000 : 60000, maxRequests: live ? 16 : 8, maxSegments: live ? 512 : 256,
   maxInputBytes: live ? 2000000 : 480000, maxCostUsd: live ? 0.2 : 0.1, requestTimeoutMs: 15000, maxDurationMs: live ? 240000 : 120000 };
 const decision = { archiveLimit: live ? 8 : 4, decisionTimeoutMs: live ? 360000 : 180000, sketchMaxUpdates: 4 };
+// LHTB's harness keeps agents working until the task timeout. Without verifier access, a neutral
+// reminder does the same for every arm whenever the agent stops early.
+const CONTINUE_PROMPT = 'Your time budget has not run out. Continue working on the task: check your work against every requirement in the original instructions and keep improving the result until it is fully complete. Do not stop early.';
+const MAX_CONTINUATIONS = 60;
 const systemPrompt = lhtb ? `Complete the task described by the user inside an offline container. Your workspace is ${root}. Use read to inspect text files, with offset/limit for focused reads. Use bash to run commands, edit files, and test. Commands execute in an isolated container with no network access. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds; run longer jobs in the background and poll them. The task instructions define when the work is complete, so keep working until they are satisfied. Finish with a concise summary.`
   : 'Fix the supplied Python repository issue in /testbed. Use read to inspect source files, with offset/limit for focused reads. Use bash to search, edit, and test. Commands execute in an isolated offline container. Do not commit. Keep each command output below 32000 bytes and 2000 lines, and each command below 120 seconds. Use the source and available tests, not network access. Finish with a concise summary of the fix and tests.';
 const report = { version: 2, lifecycle: WORKING_POLICY, developmentOnly: true, mode, completed: false,
@@ -204,6 +208,9 @@ async function arm(phase, instruction) {
   const abortRun = () => fail('Experiment deadline');
   deadline.addEventListener('abort', abortRun, { once: true });
   const started = performance.now();
+  // Stop starting requests early enough that the last one finishes before the hard deadline, so
+  // the arm ends with complete accounting instead of an aborted, unpriced request.
+  const softDeadline = lhtb ? started + bounds.runMs - bounds.requestMs - 30000 : Infinity;
   try {
     await sandbox.start();
     outcome.configuration = sandbox.configuration;
@@ -263,6 +270,7 @@ async function arm(phase, instruction) {
     const inner = session.agent.streamFunction;
     session.agent.streamFunction = async (requestModel, context, options) => {
       if (outcome.requests.filter((r) => r.dispatched).length >= bounds.requestsPerArm) { fail('Request ceiling'); throw new Error(fatal); }
+      if (performance.now() >= softDeadline) { fail('Arm time budget reached'); throw new Error(fatal); }
       assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd, 'Run stopped by accounting, cost, or deadline');
       const turn = outcome.requests.length + 1;
       fixtureTurn = turn;
@@ -339,6 +347,12 @@ async function arm(phase, instruction) {
       }
     });
     await session.prompt(instruction);
+    outcome.continuations = 0;
+    while (lhtb && live && !fatal && outcome.continuations < MAX_CONTINUATIONS && performance.now() < softDeadline
+      && session.messages.findLast((m) => m.role === 'assistant')?.stopReason === 'stop') {
+      outcome.continuations++;
+      await session.prompt(CONTINUE_PROMPT);
+    }
   } catch (e) { outcome.failure = errorText(e); }
   finally {
     if (outcome.requests.some((r) => r.dispatched && !r.usage)) report.accountingComplete = false;
@@ -372,6 +386,8 @@ async function arm(phase, instruction) {
     const last = session?.messages.findLast((m) => m.role === 'assistant');
     outcome.completed = !outcome.failure && !fatal && !outcome.stops.length && report.accountingComplete && last?.stopReason === 'stop';
     outcome.failure ??= fatal ?? outcome.stops.at(-1)?.reason ?? (outcome.completed ? null : 'No accounted final response');
+    outcome.endReason = outcome.completed ? 'model-stop' : ['Arm time budget reached', 'Request ceiling'].includes(outcome.failure) ? 'budget'
+      : outcome.failure === 'Experiment deadline' ? 'hard-deadline' : 'error';
     outcome.codingCatalogCostUsd = outcome.requests.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0);
     // Whether the arm ever crossed the eviction trigger decides whether it tested management at all.
     outcome.peakInputTokens = Math.max(0, ...outcome.requests.map((r) => r.usage?.input ?? 0));

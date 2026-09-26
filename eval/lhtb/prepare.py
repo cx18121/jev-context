@@ -15,10 +15,9 @@ for name in args.tasks:
     task_dir = args.source / 'tasks' / name
     config = tomllib.loads((task_dir / 'task.toml').read_text())
     env = config['environment']
-    # The runner has no network, no GPU and no continue-until-timeout loop. Reject tasks that need them,
-    # and tasks whose own pacing estimate exceeds the arm deadline.
+    # The runner has no network and no GPU. Reject tasks that need them, and tasks whose own pacing
+    # estimate exceeds the arm deadline. The runner's continue reminder stands in for LHTB's loop.
     assert not env.get('allow_internet') and not env.get('gpus'), f'{name} needs network or GPU'
-    assert not config.get('agent', {}).get('continue_until_timeout', False), f'{name} relies on continue-until-timeout'
     paced = config.get('metadata', {}).get('estimated_duration_sec')
     assert paced is None or paced <= args.arm_minutes * 60, f'{name} is paced to {paced}s, longer than the arm'
     tag = env['docker_image']
