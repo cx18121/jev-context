@@ -194,3 +194,18 @@ test('unknown record versions and off-branch source IDs fail explicitly', () => 
   manager.appendCustomEntry(SELECTION_ENTRY, { version: 2, policy: 'fixture-v1', sourceLeafId: 'other-branch' });
   assert.throws(() => snapshot(manager), /different branch/);
 });
+
+test('Pi retry omissions of failed assistant attempts are not selection edits', () => {
+  const manager = SessionManager.inMemory();
+  const { oldId } = seedHistory(manager);
+  const failed = manager.appendMessage({ ...assistant(), stopReason: 'error', errorMessage: 'Codex error: You can retry your request.' });
+  manager.appendContextEdit(failed, null);
+  record(manager, [oldId]);
+  assert.deepEqual(snapshot(manager).retiredIds, [oldId]);
+  // Omitting a successful message, or a tool result with null, is still an unknown edit.
+  const other = SessionManager.inMemory();
+  seedHistory(other);
+  const ok = other.appendMessage(assistant());
+  other.appendContextEdit(ok, null);
+  assert.throws(() => snapshot(other));
+});

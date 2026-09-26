@@ -50,9 +50,18 @@ export function readHistory(branch: SessionEntry[], messages: AgentMessage[]): H
   const ancestors = new Set<string>();
   let previousId: string | null = null;
   let pending: { sourceLeafId: string | null } | undefined;
+  const failedAssistants = new Set<string>();
 
   for (const entry of branch) {
     if (ancestors.has(entry.id) || entry.parentId !== previousId) throw new Error('History is not a complete ordered branch');
+    if (entry.type === 'message' && entry.message.role === 'assistant' &&
+        (entry.message.stopReason === 'error' || entry.message.stopReason === 'aborted')) failedAssistants.add(entry.id);
+    // Pi's automatic retry durably omits the failed assistant attempt. It is not a selection edit.
+    if (!pending && entry.type === 'context_edit' && entry.replacement === null && failedAssistants.has(entry.targetId)) {
+      ancestors.add(entry.id);
+      previousId = entry.id;
+      continue;
+    }
     const checkpoint = entry.type === 'custom' && entry.customType === SELECTION_ENTRY;
     if (pending && entry.type !== 'context_edit' && !checkpoint) throw new Error('Incomplete native selection edit group');
     if (entry.type === 'context_edit') {

@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
+import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { createAgentSession, createBashToolDefinition, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { createWorkingContextExtension, INFERENCE_START_ENTRY, INFERENCE_RESULT_ENTRY, STOP_ENTRY, USAGE_ENTRY, DEFERRAL_ENTRY, WORKING_POLICY } from '../../src/working-extension.ts';
 import { SELECTION_ENTRY } from '../../src/history.ts';
@@ -20,7 +21,7 @@ import { guardedSketch, SKETCH_REQUEST_BYTES } from './sketch.mjs';
 
 process.umask(0o077);
 const [mode, taskFile, output, ...extra] = process.argv.slice(2);
-assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--local-compaction', '--live'].includes(mode)
+assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--local-compaction', '--local-provider-flake', '--live'].includes(mode)
   && taskFile && output && extra.length <= 2 && extra.every((a) => a.startsWith('--arms=') || a.startsWith('--minutes=')),
   'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY [--arms=a,b] [--minutes=N]');
 const armsArg = extra.find((a) => a.startsWith('--arms='));
@@ -33,13 +34,14 @@ const arms = armsArg ? armsArg.slice('--arms='.length).split(',') : live ? ARM_O
 assert.ok(arms.length > 0 && new Set(arms).size === arms.length && arms.every((a) => ARM_ORDER.includes(a))
   && arms.every((a, i) => i === 0 || ARM_ORDER.indexOf(arms[i - 1]) < ARM_ORDER.indexOf(a)), 'Arms must be distinct and in canonical order');
 const pairContract = arms.length === 2 && arms[0] === 'control' && arms[1] === 'selector';
-assert.ok(live || mode === '--local' || pairContract || (mode === '--local-compaction' && arms.length === 1 && arms[0] === 'default'),
-  'Failure fixtures exercise the control and selector arms; --local-compaction exercises default');
 const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const lhtb = task.kind === 'lhtb';
 const root = taskRoot(task);
+assert.ok(live || mode === '--local' || pairContract || (mode === '--local-compaction' && arms.length === 1 && arms[0] === 'default')
+  || (mode === '--local-provider-flake' && lhtb && arms.length === 1),
+  'Failure fixtures exercise the control and selector arms; --local-compaction exercises default');
 // LHTB arms run as separate processes, so each gets its own deadline and they can run in parallel.
-assert.ok(!lhtb || ((live || mode === '--local') && armsArg && arms.length === 1), 'LHTB runs are live or --local smoke, one explicit arm per process');
+assert.ok(!lhtb || ((live || mode === '--local' || mode === '--local-provider-flake') && armsArg && arms.length === 1), 'LHTB runs are live or local smoke, one explicit arm per process');
 // A shorter deadline is for live canaries of the deadline path; it never extends the LHTB arm budget.
 const canaryMinutes = minutesArg ? Number(minutesArg.slice('--minutes='.length)) : null;
 assert.ok(canaryMinutes === null || (lhtb && Number.isInteger(canaryMinutes) && canaryMinutes >= 1 && canaryMinutes <= 95), '--minutes is an LHTB canary deadline from 1 to 95');
@@ -57,7 +59,12 @@ const prices = pinned.cost;
 const pinnedSketch = catalog['openai-codex-responses']['gpt-6-luna'];
 // Live runs use the long-task profile: late, large evictions that leave short tasks untouched. Local
 // fixtures keep the small profile their scripted usage is built around.
-const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24, requestMs: lhtb ? 300000 : 90000,
+// LHTB arms retry transient provider failures like normal Pi, detect stalled streams by inactivity,
+// and allow long generations. SWE-bench runs keep their original no-retry policy.
+const flake = mode === '--local-provider-flake';
+const retries = lhtb ? { enabled: true, maxRetries: 3, baseDelayMs: flake ? 50 : 5000, provider: { maxRetries: 0 } } : { enabled: false, provider: { maxRetries: 0 } };
+const bounds = { requestsPerArm: mode === '--local-request-cap' ? 2 : lhtb ? 400 : live ? 150 : 24, judgeRequests: live ? 240 : 24,
+  requestMs: lhtb ? 600000 : 90000, idleMs: flake ? 3000 : lhtb ? 120000 : Infinity,
   runMs: canaryMinutes ? canaryMinutes * 60000 : lhtb ? 5700000 : live ? 14400000 : 2400000, toolSeconds: 120, requestBytes: live ? 2000000 : 180000, responseBytes: lhtb ? 16000000 : 512000, catalogStopUsd: lhtb ? 22 : live ? 30 : 3,
   sketchRequests: live ? 150 : 24, sketchMs: 30000, sketchMaxTokens: 4096, sketchRequestBytes: SKETCH_REQUEST_BYTES, sketchResponseBytes: 128000 };
 const capacity = { contextLimit: live ? 256000 : 180000, marginTokens: 1024, outputReserveTokens: 4096, maxRequestBytes: bounds.requestBytes };
@@ -77,8 +84,9 @@ const report = { version: 2, lifecycle: WORKING_POLICY, developmentOnly: true, m
   accountingComplete: true, arms: [], requests: [], sketchRequests: [], judgeRequests: [], judgeDispatches: 0 };
 const deadline = AbortSignal.timeout(bounds.runMs);
 const nativeFetch = globalThis.fetch;
+const flakeSeen = {};
 let runtime, server, model, sketchModel, baseUrl, judgeEndpoint, activeArm, fixtureTurn, sourceSnapshot, fixturePaths;
-const spent = () => [...report.requests, ...report.sketchRequests].reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0)
+const spent = () => [...report.requests, ...report.sketchRequests].reduce((n, r) => n + (r.usage?.catalogCostUsd ?? r.estimatedCostUsd ?? 0), 0)
   + report.judgeDispatches * 64000 * 0.042 / 1e6;
 let jevKey = 'local-fake-key';
 const errorText = (e) => e instanceof assert.AssertionError ? e.message.split('\n')[0] : String(e.message);
@@ -124,6 +132,16 @@ async function setup() {
         }
         assert.equal(req.url, '/codex/responses');
         const isSketch = body.model === 'gpt-6-luna';
+        if (flake && !isSketch) {
+          flakeSeen[fixtureTurn] = (flakeSeen[fixtureTurn] ?? 0) + 1;
+          if (fixtureTurn === 2 && flakeSeen[2] === 1) {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.end(`data: ${JSON.stringify({ type: 'error', message: 'An error occurred while processing your request. You can retry your request.' })}\n\n`); return;
+          }
+          if (fixtureTurn === 3 && flakeSeen[3] === 1) {
+            res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': stalled\n\n'); return;
+          }
+        }
         // Pi's native compaction summarizes with a tool-free request; answer it with a summary.
         if (!isSketch && !body.tools?.length) {
           const output = [{ type: 'message', id: `msg_compact_${randomUUID()}`, role: 'assistant', status: 'completed',
@@ -246,7 +264,7 @@ async function arm(phase, instruction) {
     bash.executionMode = 'sequential';
     // --local-compaction lowers Pi's threshold so the scripted 30k-token usage forces a native compaction.
     const compaction = mode === '--local-compaction' ? { enabled: true, reserveTokens: 250000, keepRecentTokens: 200 } : { enabled: phase === 'default' };
-    const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction, retry: { enabled: false, provider: { maxRetries: 0 } } });
+    const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction, retry: retries });
     const guard = () => assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd,
       'Run stopped by accounting, cost, or deadline');
     const sketch = guardedSketch({ runtime, model: sketchModel, sessionId: manager.getSessionId(), phase, bounds, deadline,
@@ -320,11 +338,19 @@ async function arm(phase, instruction) {
           record.dispatched = true; record.wireSha256 = sha(JSON.stringify(wire)); if (capture) captures.push(capture);
           const dispatchStart = performance.now();
           record.preDispatchMs = Math.round(dispatchStart - requestStart);
+          // A stream with no bytes for idleMs has stalled. Aborting only the fetch surfaces a retryable
+          // provider error to Pi, unlike aborting the agent's own signal.
+          const idle = new AbortController(); let idleTimer;
+          const touch = () => { clearTimeout(idleTimer); if (Number.isFinite(bounds.idleMs)) idleTimer = setTimeout(() => idle.abort(new Error('Stream idle timeout')), bounds.idleMs); };
+          touch();
           const response = await nativeFetch(url, { ...init,
-            signal: AbortSignal.any([signal, AbortSignal.timeout(bounds.requestMs)]), redirect: 'error' });
+            signal: AbortSignal.any([signal, AbortSignal.timeout(bounds.requestMs), idle.signal]), redirect: 'error' });
           record.httpStatus = response.status; record.requestToHeadersMs = Math.round(performance.now() - dispatchStart);
           record.dispatchedAt = performance.now();
-          return tapResponse(response, record, controller, prices, bounds.responseBytes);
+          const watched = !response.body ? response : new Response(response.body.pipeThrough(new TransformStream({
+            transform(chunk, out) { touch(); out.enqueue(chunk); }, flush() { clearTimeout(idleTimer); },
+          })), { status: response.status, headers: response.headers });
+          return tapResponse(watched, record, controller, prices, bounds.responseBytes);
         },
       });
     };
@@ -341,8 +367,14 @@ async function arm(phase, instruction) {
         last.stopReason = event.message.stopReason; last.piUsage = event.message.usage;
         last.elapsedAfterHeadersMs = last.dispatchedAt ? Math.round(performance.now() - last.dispatchedAt) : null;
         delete last.dispatchedAt;
-        if (last.dispatched && !last.usage) { report.accountingComplete = false; fail('Missing or invalid usage'); }
-        if (!['toolUse', 'stop'].includes(event.message.stopReason)) fatal ??= event.message.errorMessage ?? `Model stopped: ${event.message.stopReason}`;
+        const retryable = retries.enabled && isRetryableAssistantError(event.message);
+        if (last.dispatched && !last.usage && retryable) {
+          // Pi will retry. The failed attempt may still be billed, so charge all of its input as uncached
+          // plus 4,096 output tokens. This keeps accounting complete and conservative.
+          last.failedAttempt = event.message.errorMessage?.split('\n')[0] ?? 'provider error';
+          last.estimatedCostUsd = ((last.afterBytes ?? 0) / 3 * prices.input + 4096 * prices.output) / 1e6;
+        } else if (last.dispatched && !last.usage) { report.accountingComplete = false; fail('Missing or invalid usage'); }
+        if (!['toolUse', 'stop'].includes(event.message.stopReason) && !retryable) fatal ??= event.message.errorMessage ?? `Model stopped: ${event.message.stopReason}`;
         console.log(JSON.stringify({ phase, turn: last.turn, dispatched: last.dispatched, stopReason: last.stopReason, usage: last.usage, changedOutputs: last.changedOutputs }));
       }
     });
@@ -355,7 +387,7 @@ async function arm(phase, instruction) {
     }
   } catch (e) { outcome.failure = errorText(e); }
   finally {
-    if (outcome.requests.some((r) => r.dispatched && !r.usage)) report.accountingComplete = false;
+    if (outcome.requests.some((r) => r.dispatched && !r.usage && r.estimatedCostUsd === undefined)) report.accountingComplete = false;
     const entries = manager.getBranch();
     const records = (kind) => entries.filter((e) => e.type === 'custom' && e.customType === kind).map((e) => e.data);
     outcome.stops = records(STOP_ENTRY); outcome.deferrals = records(DEFERRAL_ENTRY);
@@ -388,7 +420,8 @@ async function arm(phase, instruction) {
     outcome.failure ??= fatal ?? outcome.stops.at(-1)?.reason ?? (outcome.completed ? null : 'No accounted final response');
     outcome.endReason = outcome.completed ? 'model-stop' : ['Arm time budget reached', 'Request ceiling'].includes(outcome.failure) ? 'budget'
       : outcome.failure === 'Experiment deadline' ? 'hard-deadline' : 'error';
-    outcome.codingCatalogCostUsd = outcome.requests.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? 0), 0);
+    outcome.codingCatalogCostUsd = outcome.requests.reduce((n, r) => n + (r.usage?.catalogCostUsd ?? r.estimatedCostUsd ?? 0), 0);
+    outcome.failedAttempts = outcome.requests.filter((r) => r.failedAttempt).map((r) => ({ turn: r.turn, error: r.failedAttempt }));
     // Whether the arm ever crossed the eviction trigger decides whether it tested management at all.
     outcome.peakInputTokens = Math.max(0, ...outcome.requests.map((r) => r.usage?.input ?? 0));
     // Managed arms evict before sending, so their reported input stays low; count evictions instead.
@@ -446,7 +479,12 @@ try {
     await arm(phase, instruction);
   }
   report.completed = report.arms.every((a) => a.completed);
-  if (mode === '--local-compaction') {
+  if (flake) {
+    const [outcome] = report.arms;
+    assert.ok(report.completed && report.accountingComplete, JSON.stringify(outcome.failure));
+    assert.equal(outcome.failedAttempts.length, 2, 'One provider error and one stalled stream are retried');
+    assert.ok(outcome.failedAttempts.some((f) => /retry/i.test(f.error)) && outcome.failedAttempts.some((f) => /idle|timeout/i.test(f.error)), JSON.stringify(outcome.failedAttempts));
+  } else if (mode === '--local-compaction') {
     const [outcome] = report.arms;
     assert.ok(report.completed && report.accountingComplete, JSON.stringify(outcome.failure));
     assert.ok(outcome.compactions >= 1, 'Native compaction must run');
@@ -514,7 +552,7 @@ try {
   report.contractsPassed = !live;
 } catch (e) { report.failure = errorText(e); process.exitCode = 1; }
 finally {
-  if ([...report.requests, ...report.sketchRequests].some((r) => r.dispatched && !r.usage)) report.accountingComplete = false;
+  if ([...report.requests, ...report.sketchRequests].some((r) => r.dispatched && !r.usage && r.estimatedCostUsd === undefined)) report.accountingComplete = false;
   globalThis.fetch = nativeFetch;
   await save('report.json', report);
   if (server) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
