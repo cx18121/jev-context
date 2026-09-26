@@ -47,7 +47,8 @@ async function main(runPath: string, referencePath: string) {
   for (const arm of trajectory.arms) {
     if (arm.skipped) { arms.push({ phase: arm.phase, status: 'skipped', reason: arm.skipped }); continue; }
     const captures: RequestCapture[] = await read(`${arm.phase}-captures.json`);
-    const dispatched = arm.requests.filter((r: { dispatched: boolean }) => r.dispatched);
+    const dispatched = arm.requests.filter((r: { dispatched: boolean; summaryRequest?: boolean; captureSkipped?: string }) =>
+      r.dispatched && !r.summaryRequest && !r.captureSkipped);
     assert.equal(captures.length, dispatched.length, 'Each dispatched request must have one capture');
     for (const [i, capture] of captures.entries()) {
       assert.equal(capture.requestId, `${arm.phase}-${dispatched[i].turn}`);

@@ -20,7 +20,7 @@ import { guardedSketch, SKETCH_REQUEST_BYTES } from './sketch.mjs';
 
 process.umask(0o077);
 const [mode, taskFile, output, ...extra] = process.argv.slice(2);
-assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--live'].includes(mode)
+assert.ok(['--local', '--local-invalid-usage', '--local-judge-failure', '--local-request-cap', '--local-sketch-invalid-usage', '--local-judge-invalid', '--local-compaction', '--live'].includes(mode)
   && taskFile && output && extra.length <= 1 && extra.every((a) => a.startsWith('--arms=')), 'Usage: run.mjs MODE agent-task.json NEW_OUTPUT_DIRECTORY [--arms=a,b]');
 const live = mode === '--live';
 // default: unmodified Pi with native compaction. clearing: threshold clearing, no restoration, sketch, or Jev.
@@ -30,7 +30,8 @@ const arms = extra.length ? extra[0].slice('--arms='.length).split(',') : live ?
 assert.ok(arms.length > 0 && new Set(arms).size === arms.length && arms.every((a) => ARM_ORDER.includes(a))
   && arms.every((a, i) => i === 0 || ARM_ORDER.indexOf(arms[i - 1]) < ARM_ORDER.indexOf(a)), 'Arms must be distinct and in canonical order');
 const pairContract = arms.length === 2 && arms[0] === 'control' && arms[1] === 'selector';
-assert.ok(live || mode === '--local' || pairContract, 'Failure fixtures exercise the control and selector arms');
+assert.ok(live || mode === '--local' || pairContract || (mode === '--local-compaction' && arms.length === 1 && arms[0] === 'default'),
+  'Failure fixtures exercise the control and selector arms; --local-compaction exercises default');
 const task = parseTask(JSON.parse(await readFile(taskFile, 'utf8')));
 const lhtb = task.kind === 'lhtb';
 const root = taskRoot(task);
@@ -72,7 +73,10 @@ const spent = () => [...report.requests, ...report.sketchRequests].reduce((n, r)
 let jevKey = 'local-fake-key';
 const errorText = (e) => e instanceof assert.AssertionError ? e.message.split('\n')[0] : String(e.message);
 
+// Compare what goes on the wire. structuredClone keeps undefined-valued keys that JSON drops.
+const wireJson = (value) => JSON.parse(JSON.stringify(value));
 function withoutToolText(body) {
+  body = wireJson(body);
   return { ...body, input: body.input.map((i) => i.type === 'function_call_output' || i.type === 'custom_tool_call_output' ? { ...i, output: '<text>' } : i) };
 }
 function fixtureOutput(turn) {
@@ -110,6 +114,16 @@ async function setup() {
         }
         assert.equal(req.url, '/codex/responses');
         const isSketch = body.model === 'gpt-6-luna';
+        // Pi's native compaction summarizes with a tool-free request; answer it with a summary.
+        if (!isSketch && !body.tools?.length) {
+          const output = [{ type: 'message', id: `msg_compact_${randomUUID()}`, role: 'assistant', status: 'completed',
+            content: [{ type: 'output_text', text: '## Goal\nFix the issue.\n## Progress\nRead two files.', annotations: [] }] }];
+          const usage = { input_tokens: 6000, output_tokens: 300, total_tokens: 6300, input_tokens_details: { cached_tokens: 0 } };
+          const events = [...output.map((item, output_index) => ({ type: 'response.output_item.done', output_index, item })),
+            { type: 'response.completed', response: { id: randomUUID(), status: 'completed', output, usage } }];
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n')); return;
+        }
         const output = isSketch ? [{ type: 'message', id: `msg_sketch_${randomUUID()}`, role: 'assistant', status: 'completed',
           content: [{ type: 'output_text', text: JSON.stringify({ summary: 'Fix the supplied Python repository issue using source reads and tests.' }), annotations: [] }] }] : fixtureOutput(fixtureTurn);
         // Pressure first retires evidence; the third coding response establishes restoration headroom.
@@ -213,7 +227,9 @@ async function arm(phase, instruction) {
     bash.description = (lhtb ? `Execute bash in the offline container, starting in ${root}.` : 'Execute bash in the offline /testbed container.')
       + ' Returns a prefix of stdout and stderr, at most 32000 bytes and 2000 lines including a truncation notice. Discarded output is not saved. Narrow commands when output is truncated. Commands have a maximum timeout of 120 seconds.';
     bash.executionMode = 'sequential';
-    const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction: { enabled: phase === 'default' }, retry: { enabled: false, provider: { maxRetries: 0 } } });
+    // --local-compaction lowers Pi's threshold so the scripted 30k-token usage forces a native compaction.
+    const compaction = mode === '--local-compaction' ? { enabled: true, reserveTokens: 250000, keepRecentTokens: 200 } : { enabled: phase === 'default' };
+    const settings = SettingsManager.inMemory({ transport: 'sse', cacheWarming: 'off', compaction, retry: { enabled: false, provider: { maxRetries: 0 } } });
     const guard = () => assert.ok(!fatal && !deadline.aborted && report.accountingComplete && spent() < bounds.catalogStopUsd,
       'Run stopped by accounting, cost, or deadline');
     const sketch = guardedSketch({ runtime, model: sketchModel, sessionId: manager.getSessionId(), phase, bounds, deadline,
@@ -264,7 +280,7 @@ async function arm(phase, instruction) {
             assert.equal(after.prompt_cache_key, manager.getSessionId());
           }
           assert.ok(record.afterBytes <= bounds.requestBytes);
-          inspected = structuredClone(after); return after;
+          inspected = wireJson(after); return after;
         },
         async fetch(url, init) {
           assert.equal(String(url), `${baseUrl}/codex/responses`);
@@ -275,7 +291,11 @@ async function arm(phase, instruction) {
           const wire = JSON.parse((headers.get('content-encoding') === 'zstd' ? zstdDecompressSync(bytes) : bytes).toString());
           assert.deepEqual(wire, inspected);
           if (phase !== 'default' || headers.get('session-id') !== null) assert.equal(headers.get('session-id'), manager.getSessionId());
-          const capture = sourceSnapshot && captureRequest({ sessionId: manager.getSessionId(), requestId: `${phase}-${turn}`,
+          // Native compaction summaries are tool-free requests carrying serialized history, not tool results.
+          record.summaryRequest = !wire.tools?.length;
+          // Coverage mapping needs uncompacted history; after a native compaction it is explicitly unavailable.
+          if (manager.getBranch().some((e) => e.type === 'compaction')) record.captureSkipped = 'compacted-history';
+          const capture = sourceSnapshot && !record.summaryRequest && !record.captureSkipped && captureRequest({ sessionId: manager.getSessionId(), requestId: `${phase}-${turn}`,
             branch: manager.getBranch(), payload: wire, model, source: sourceSnapshot });
           await save(`${phase}-${turn}-request.json`, wire);
           signal.throwIfAborted(); guard();
@@ -291,6 +311,11 @@ async function arm(phase, instruction) {
       });
     };
     session.subscribe((event) => {
+      if (event.type === 'compaction_start' || event.type === 'compaction_end') {
+        (outcome.compactionEvents ??= []).push({ type: event.type, reason: event.reason, aborted: event.aborted, error: event.errorMessage });
+        // Pi continues uncompacted after a failed compaction, which would silently break the baseline.
+        if (event.type === 'compaction_end' && event.errorMessage) fail(`Native compaction failed: ${event.errorMessage.split('\n')[0]}`);
+      }
       if (event.type !== 'message_end' || event.message.role !== 'assistant') return;
       const last = outcome.requests.at(-1);
       if (last && !last.messageEnded) {
@@ -395,7 +420,12 @@ try {
     await arm(phase, instruction);
   }
   report.completed = report.arms.every((a) => a.completed);
-  if (mode === '--local' && !pairContract) {
+  if (mode === '--local-compaction') {
+    const [outcome] = report.arms;
+    assert.ok(report.completed && report.accountingComplete, JSON.stringify(outcome.failure));
+    assert.ok(outcome.compactions >= 1, 'Native compaction must run');
+    assert.ok(outcome.requests.every((r) => !r.dispatched || r.usage), 'Every dispatched request, including compaction, is accounted');
+  } else if (mode === '--local' && !pairContract) {
     // Smoke contract for baseline arms: complete, accounted, and only the managed arms edit history.
     assert.ok(report.completed, JSON.stringify(report.arms.map((a) => a.failure)));
     for (const outcome of report.arms) {

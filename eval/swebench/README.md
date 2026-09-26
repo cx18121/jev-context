@@ -7,7 +7,7 @@
 - `control` orders evidence by capture time, newest first, with earned restoration and the sketch. It makes no Jev calls.
 - `selector` uses Jev ranking with earned restoration and the sketch.
 
-Each arm gets the same prompt, tools and model, with a fresh offline container. Native patch grading and ContextBench source coverage use those same trajectories. Local failure fixtures use the control and selector pair; `--local --arms=...` smoke-tests other arms with scripted responses.
+Each arm gets the same prompt, tools and model, with a fresh offline container. Native patch grading and ContextBench source coverage use those same trajectories. Local failure fixtures use the control and selector pair; `--local --arms=...` smoke-tests other arms with scripted responses. `--local-compaction --arms=default` lowers Pi's compaction threshold so a scripted run exercises native compaction through the runner's accounting. A failed native compaction stops the arm, because Pi otherwise continues uncompacted.
 
 Both arms maintain a rewritable task sketch using `openai-codex/gpt-6-luna` with low reasoning. Sketches have separate cache keys and guarded transports. Their request records include the arm, catalog cost and latency. Selection requests them on demand. They never appear in coding evidence captures. Private artifacts include each sketch request and its returned text and stop reason, including rejected updates. The response-byte ceiling bounds this capture. Sketch captures exclude private reasoning and response headers.
 
