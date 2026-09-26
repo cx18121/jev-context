@@ -108,8 +108,8 @@ def main(run, dataset):
                 commands.run(['docker', 'rm', '-f', f'sweb.eval.{instance}.{run_id}'], check=False)
     finally:
         save(output / 'report.json', {'instance': instance, 'arms': outcomes,
-             'allArmsAccounted': len(outcomes) == 2, 'costClaim': 'No model inference. Grader resource use not priced.'})
-    if len(outcomes) != 2 or any(item['resolved'] is None for item in outcomes):
+             'allArmsAccounted': len(outcomes) == len(phases), 'costClaim': 'No model inference. Grader resource use not priced.'})
+    if len(outcomes) != len(phases) or any(item['resolved'] is None for item in outcomes):
         raise SystemExit(1)
 
 
